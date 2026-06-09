@@ -15,13 +15,15 @@
     }
   ],
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "vitest run"
   },
   "author": "JaDi03",
   "license": "Apache-2.0",
   "devDependencies": {
     "@peertube/peertube-types": "^8.2.0",
     "@types/node": "^25.9.2",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
   }
 }
