@@ -1,0 +1,34 @@
+{
+  "name": "peertube-plugin-arc-cashier",
+  "version": "1.0.0",
+  "description": "Arc-Cashier integration for PeerTube for per-second billing",
+  "engine": {
+    "peertube": ">= 6.0.0"
+  },
+  "main": "dist/main.js",
+  "clientScripts": [
+    {
+      "script": "dist/client.js",
+      "scopes": [
+        "video-watch"
+      ]
+    }
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "lint": "eslint"
+  },
+  "author": "JaDi03",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@peertube/peertube-types": "^8.2.0",
+    "@types/node": "^25.9.2",
+    "eslint": "^10.4.1",
+    "globals": "^17.6.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.0",
+    "vitest": "^4.1.8"
+  }
+}
