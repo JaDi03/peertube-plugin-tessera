@@ -10,7 +10,8 @@
     {
       "script": "dist/client.js",
       "scopes": [
-        "video-watch"
+        "video-watch",
+        "video-embed"
       ]
     }
   ],
