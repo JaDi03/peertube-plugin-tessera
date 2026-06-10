@@ -81,6 +81,7 @@ sequenceDiagram
 ## 🎥 Proof of Concept
 
 **PeerTube Integration (Viewer Flow)**  
+
 https://github.com/user-attachments/assets/efba151f-25e5-4e4c-9669-6191a2d7b600
 
 
