@@ -50,6 +50,7 @@ export async function register (_options: any) {
   // 4. Ping Mechanism
   const PING_INTERVAL_MS = 15000 // 15 seconds
   let pingInterval: number | undefined
+  let abortController: AbortController | null = null
 
   const sendPing = async (action: 'start' | 'stop' | 'ping') => {
       const videoId = getCurrentVideoId()
@@ -66,13 +67,38 @@ export async function register (_options: any) {
       }
   }
 
-  // Send start immediately so backend knows the viewer is here before they pay
-  sendPing('start')
-  pingInterval = window.setInterval(() => sendPing('ping'), PING_INTERVAL_MS)
-
   // 5. Hook into video player events for SPA navigation
   let currentVideo: HTMLVideoElement | null = null
 
+  const attachVideoListeners = (video: HTMLVideoElement) => {
+    // 4.1: Avoid memory leaks with AbortController for event listeners
+    if (abortController) {
+       abortController.abort()
+    }
+    abortController = new AbortController()
+    const signal = abortController.signal
+
+    video.addEventListener('play', () => {
+       if (pingInterval) clearInterval(pingInterval)
+       sendPing('start')
+       pingInterval = window.setInterval(() => sendPing('ping'), PING_INTERVAL_MS)
+    }, { signal })
+
+    // 4.2: Handle `pause` and `ended` events
+    video.addEventListener('pause', () => {
+       if (pingInterval) clearInterval(pingInterval)
+       pingInterval = undefined
+       sendPing('stop')
+    }, { signal })
+
+    video.addEventListener('ended', () => {
+       if (pingInterval) clearInterval(pingInterval)
+       pingInterval = undefined
+       sendPing('stop')
+    }, { signal })
+  }
+
+  // Fallback DOM polling to detect video element creation
   setInterval(() => {
     const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/')
     
@@ -88,16 +114,25 @@ export async function register (_options: any) {
     // Video appeared (User navigated TO a video page)
     if (video && video !== currentVideo) {
       currentVideo = video
+      attachVideoListeners(video)
       
-      video.addEventListener('play', () => {
+      // If video is already playing when we find it
+      if (!video.paused && !video.ended) {
          if (pingInterval) clearInterval(pingInterval)
+         sendPing('start')
          pingInterval = window.setInterval(() => sendPing('ping'), PING_INTERVAL_MS)
-      })
+      }
     }
 
     // Video disappeared (User navigated AWAY from video page to dashboard)
     if (!video && currentVideo) {
       currentVideo = null
+
+      // Clean up listeners
+      if (abortController) {
+         abortController.abort()
+         abortController = null
+      }
 
       // Stop billing pings immediately
       if (pingInterval) {
