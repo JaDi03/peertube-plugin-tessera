@@ -4,6 +4,7 @@ const TIMEOUT_MS = 30000
 
 interface ViewerSession {
   expireTime: number
+  lastAccessTime: number
   payload: any
 }
 
@@ -42,7 +43,7 @@ export async function register (options: any) {
 
   // Helper to send the signed webhook
   // 3.3: Return boolean to indicate success
-  const sendWebhook = async (event: 'viewer_joined' | 'viewer_left', payloadData: any): Promise<boolean> => {
+  const sendWebhook = async (event: 'viewer_joined' | 'viewer_left', payloadData: any, maxRetries = 3): Promise<boolean> => {
     const webhookUrl = await settingsManager.getSetting('webhook-url') as string
     const webhookSecret = await settingsManager.getSetting('webhook-secret') as string
 
@@ -56,29 +57,38 @@ export async function register (options: any) {
     const payload = JSON.stringify({ event, timestamp, nonce, ...payloadData })
     const signature = crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex')
 
-    try {
-      const response = await fetch(webhookUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-PeerTube-Signature': signature
-        },
-        body: payload
-      })
-      
-      // 3.3: Verify HTTP responses
-      if (!response.ok) {
-        const errorText = await response.text()
-        peertubeHelpers.logger.error(`[arc-cashier] Webhook rejected: ${response.status} ${errorText}`)
-        return false
-      }
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 10000)
 
-      peertubeHelpers.logger.info(`[arc-cashier] Webhook '${event}' sent for user ${payloadData.userId}.`)
-      return true
-    } catch (err) {
-      peertubeHelpers.logger.error(`[arc-cashier] Error sending webhook: ${err}`)
-      return false
+        const response = await fetch(webhookUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-PeerTube-Signature': signature
+          },
+          body: payload,
+          signal: controller.signal
+        })
+        clearTimeout(timeout)
+        
+        if (!response.ok) {
+          const errorText = await response.text()
+          throw new Error(`Rejected: ${response.status} ${errorText}`)
+        }
+
+        peertubeHelpers.logger.info(`[arc-cashier] Webhook '${event}' sent for user ${payloadData.userId}.`)
+        return true
+      } catch (err) {
+        if (i === maxRetries - 1) {
+          peertubeHelpers.logger.error(`[arc-cashier] Error sending webhook after ${maxRetries} attempts: ${err}`)
+          return false
+        }
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)))
+      }
     }
+    return false
   }
 
   // Global checker for inactive viewers
@@ -229,10 +239,13 @@ export async function register (options: any) {
         // 3.1: Enforce Cache Limit via LRU
         const maxSize = await getMaxActiveViewers()
         if (activeViewers.size >= maxSize) {
-          const oldestKey = activeViewers.keys().next().value
-          if (oldestKey) {
-             const sessionToEvict = activeViewers.get(oldestKey)
-             activeViewers.delete(oldestKey)
+          const entries = [...activeViewers.entries()]
+          entries.sort((a, b) => a[1].lastAccessTime - b[1].lastAccessTime)
+          const lruKey = entries[0][0]
+          
+          if (lruKey) {
+             const sessionToEvict = activeViewers.get(lruKey)
+             activeViewers.delete(lruKey)
              // Best-effort cleanup webhook
              if (sessionToEvict) {
                 sendWebhook('viewer_left', sessionToEvict.payload).catch(() => {})
@@ -244,6 +257,7 @@ export async function register (options: any) {
       // Update expiration time
       activeViewers.set(userId, {
         expireTime: Date.now() + TIMEOUT_MS,
+        lastAccessTime: Date.now(),
         payload: payloadData
       })
 
