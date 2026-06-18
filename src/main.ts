@@ -23,21 +23,28 @@ export async function register (options: any) {
     }
   }
 
+  // 3.1: Helper to get MAX_CACHE_SIZE
+  const getMaxActiveViewers = async (): Promise<number> => {
+    const max = await settingsManager.getSetting('max-active-viewers') as string
+    return parseInt(max, 10) || 10000
+  }
+
   // Helper to send the signed webhook
-  const sendWebhook = async (event: 'viewer_joined' | 'viewer_left', payloadData: any) => {
+  // 3.3: Return boolean to indicate success
+  const sendWebhook = async (event: 'viewer_joined' | 'viewer_left', payloadData: any): Promise<boolean> => {
     const webhookUrl = await settingsManager.getSetting('webhook-url') as string
     const webhookSecret = await settingsManager.getSetting('webhook-secret') as string
 
     if (!webhookUrl || !webhookSecret) {
       peertubeHelpers.logger.warn('[arc-cashier] Webhook not sent: Plugin configuration missing.')
-      return
+      return false
     }
 
     const payload = JSON.stringify({ event, ...payloadData })
     const signature = crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex')
 
     try {
-      await fetch(webhookUrl, {
+      const response = await fetch(webhookUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -45,9 +52,19 @@ export async function register (options: any) {
         },
         body: payload
       })
+      
+      // 3.3: Verify HTTP responses
+      if (!response.ok) {
+        const errorText = await response.text()
+        peertubeHelpers.logger.error(`[arc-cashier] Webhook rejected: ${response.status} ${errorText}`)
+        return false
+      }
+
       peertubeHelpers.logger.info(`[arc-cashier] Webhook '${event}' sent for user ${payloadData.userId}.`)
+      return true
     } catch (err) {
       peertubeHelpers.logger.error(`[arc-cashier] Error sending webhook: ${err}`)
+      return false
     }
   }
 
@@ -56,8 +73,16 @@ export async function register (options: any) {
     const now = Date.now()
     for (const [userId, session] of activeViewers.entries()) {
       if (now > session.expireTime) {
-        activeViewers.delete(userId)
-        sendWebhook('viewer_left', session.payload).catch(console.error)
+        // 3.4: Fix ghost sessions (await viewer_left before deletion)
+        // Add a small buffer to expireTime to avoid spamming retries every 5s if sidecar is down.
+        // We temporarily bump the expireTime to avoid multiple concurrent requests.
+        session.expireTime = now + 15000 
+        
+        sendWebhook('viewer_left', session.payload).then(success => {
+           if (success) {
+             activeViewers.delete(userId)
+           }
+        })
       }
     }
   }, 5000)
@@ -79,6 +104,15 @@ export async function register (options: any) {
     descriptionHTML: 'The secret used to sign HMAC SHA-256 requests',
     default: '',
     private: true
+  })
+
+  await registerSetting({
+    name: 'max-active-viewers',
+    label: 'Max Active Viewers',
+    type: 'input',
+    descriptionHTML: 'Maximum number of concurrent active viewers allowed in memory to prevent exhaustion.',
+    default: '10000',
+    private: false
   })
 
   // 2. Set up internal router
@@ -107,8 +141,8 @@ export async function register (options: any) {
     let authUser: any = null
     try {
       authUser = await peertubeHelpers.user.getAuthUser(res)
-    } catch (err) {
-      peertubeHelpers.logger.error(`[arc-cashier] Error getting auth user: ${err}`)
+    } catch {
+      // Ignored
     }
 
     if (!authUser) {
@@ -122,7 +156,6 @@ export async function register (options: any) {
     let channelId = ''
     let channelName = ''
     try {
-      // In PeerTube v6+, video object includes the channel if loaded via loadByIdOrUUID
       const video = await peertubeHelpers.videos.loadByIdOrUUID(videoId)
       if (video && (video as any).VideoChannel) {
         channelId = (video as any).VideoChannel.name || (video as any).VideoChannel.id.toString()
@@ -145,7 +178,25 @@ export async function register (options: any) {
 
     if (action === 'start' || action === 'ping') {
       if (!activeViewers.has(userId)) {
-        await sendWebhook('viewer_joined', payloadData)
+        // 3.2: Prevent race condition by awaiting webhook before adding to map
+        const success = await sendWebhook('viewer_joined', payloadData)
+        if (!success) {
+           return res.status(502).json({ error: 'Failed to notify payment sidecar' })
+        }
+
+        // 3.1: Enforce Cache Limit via LRU
+        const maxSize = await getMaxActiveViewers()
+        if (activeViewers.size >= maxSize) {
+          const oldestKey = activeViewers.keys().next().value
+          if (oldestKey) {
+             const sessionToEvict = activeViewers.get(oldestKey)
+             activeViewers.delete(oldestKey)
+             // Best-effort cleanup webhook
+             if (sessionToEvict) {
+                sendWebhook('viewer_left', sessionToEvict.payload).catch(() => {})
+             }
+          }
+        }
       }
 
       // Update expiration time
@@ -156,8 +207,13 @@ export async function register (options: any) {
 
     } else if (action === 'stop') {
       if (activeViewers.has(userId)) {
-        activeViewers.delete(userId)
-        await sendWebhook('viewer_left', payloadData)
+        // 3.4: Await webhook before local deletion
+        const success = await sendWebhook('viewer_left', payloadData)
+        if (success) {
+           activeViewers.delete(userId)
+        } else {
+           return res.status(502).json({ error: 'Failed to stop session' })
+        }
       }
     }
 
