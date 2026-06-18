@@ -57,11 +57,22 @@ export async function register (_options: any) {
       const videoUrl = window.location.href
 
       try {
-          await fetch('/plugins/arc-cashier/router/ping', {
+          const response = await fetch('/plugins/arc-cashier/router/ping', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ action, videoId, videoUrl })
           })
+          if (!response.ok) {
+              if (response.status === 401) {
+                  console.warn('[arc-cashier] Unauthenticated. Stopping ping loop.')
+                  if (pingInterval) {
+                      clearInterval(pingInterval)
+                      pingInterval = undefined
+                  }
+              } else if (response.status === 429) {
+                  console.warn('[arc-cashier] Rate limited. Skipping this ping.')
+              }
+          }
       } catch (err) {
           console.error('[arc-cashier] Failed to send ping:', err)
       }
