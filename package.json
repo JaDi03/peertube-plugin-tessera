@@ -1,7 +1,7 @@
 {
-  "name": "peertube-plugin-arc-cashier",
+  "name": "peertube-plugin-tessera",
   "version": "1.0.9",
-  "description": "Arc-Cashier integration for PeerTube for per-second billing",
+  "description": "Tessera integration for PeerTube for per-second billing",
   "engine": {
     "peertube": ">= 6.0.0"
   },
@@ -21,9 +21,9 @@
     "lint": "eslint"
   },
   "author": "JaDi03",
-  "homepage": "https://github.com/JaDi03/Arc-Cashier",
-  "bugs": "https://github.com/JaDi03/Arc-Cashier/issues",
-  "library": "peertubePluginArcCashier",
+  "homepage": "https://github.com/JaDi03/peertube-plugin-tessera",
+  "bugs": "https://github.com/JaDi03/peertube-plugin-tessera/issues",
+  "library": "peertubePluginTessera",
   "license": "Apache-2.0",
   "devDependencies": {
     "@eslint/js": "^10.0.1",

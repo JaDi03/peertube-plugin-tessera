@@ -49,7 +49,7 @@ export async function register (options: RegisterServerOptions) {
     const webhookSecret = await settingsManager.getSetting('webhook-secret') as string
 
     if (!webhookUrl || !webhookSecret) {
-      peertubeHelpers.logger.warn('[arc-cashier] Webhook not sent: Plugin configuration missing.')
+      peertubeHelpers.logger.warn('[tessera] Webhook not sent: Plugin configuration missing.')
       return false
     }
 
@@ -79,11 +79,11 @@ export async function register (options: RegisterServerOptions) {
           throw new Error(`Rejected: ${response.status} ${errorText}`)
         }
 
-        peertubeHelpers.logger.info(`[arc-cashier] Webhook '${event}' sent for user ${payloadData.userId}.`)
+        peertubeHelpers.logger.info(`[tessera] Webhook '${event}' sent for user ${payloadData.userId}.`)
         return true
       } catch (err) {
         if (i === maxRetries - 1) {
-          peertubeHelpers.logger.error(`[arc-cashier] Error sending webhook after ${maxRetries} attempts: ${err}`)
+          peertubeHelpers.logger.error(`[tessera] Error sending webhook after ${maxRetries} attempts: ${err}`)
           return false
         }
         await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)))
@@ -118,19 +118,19 @@ export async function register (options: RegisterServerOptions) {
     }
   }, 5000)
 
-  // 1. Register settings for Arc-Cashier integration
+  // 1. Register settings for Tessera integration
   await registerSetting({
     name: 'webhook-url',
-    label: 'Arc-Cashier Webhook URL',
+    label: 'Tessera Webhook URL',
     type: 'input',
-    descriptionHTML: 'The URL to send events (e.g. https://your-arc-cashier.com/api/connectors/peertube/webhook)',
+    descriptionHTML: 'The URL to send events (e.g. https://your-tessera.com/api/connectors/peertube/webhook)',
     default: '',
     private: true
   })
 
   await registerSetting({
     name: 'webhook-secret',
-    label: 'Arc-Cashier Webhook Secret',
+    label: 'Tessera Webhook Secret',
     type: 'input',
     descriptionHTML: 'The secret used to sign HMAC SHA-256 requests',
     default: '',
@@ -150,7 +150,7 @@ export async function register (options: RegisterServerOptions) {
     name: 'base-rate-per-second',
     label: 'Base Rate Per Second',
     type: 'input',
-    descriptionHTML: 'Default Arc-Cashier payment rate per second for videos without explicit pricing (e.g. 0.0001)',
+    descriptionHTML: 'Default Tessera payment rate per second for videos without explicit pricing (e.g. 0.0001)',
     default: '0.0001',
     private: false
   })
@@ -196,7 +196,7 @@ export async function register (options: RegisterServerOptions) {
     }
 
     if (!authUser) {
-      return res.status(401).json({ error: 'Authentication required for Arc-Cashier payments' })
+      return res.status(401).json({ error: 'Authentication required for Tessera payments' })
     }
 
     // 5.1: Rate limit check (1 req per 5s)
@@ -209,7 +209,7 @@ export async function register (options: RegisterServerOptions) {
 
     const webhookSecret = (await settingsManager.getSetting('webhook-secret')) as string
     if (!webhookSecret) {
-      peertubeHelpers.logger.error('[arc-cashier] webhook-secret not configured. Refusing to generate userId.')
+      peertubeHelpers.logger.error('[tessera] webhook-secret not configured. Refusing to generate userId.')
       return res.status(503).json({ error: 'Plugin not configured' })
     }
     const userId = crypto.createHmac('sha256', webhookSecret).update(`pt_user_${authUser.id}`).digest('hex').substring(0, 16)
@@ -237,7 +237,7 @@ export async function register (options: RegisterServerOptions) {
         }
       }
     } catch {
-      peertubeHelpers.logger.warn(`[arc-cashier] Could not load video metadata for ${videoId}`)
+      peertubeHelpers.logger.warn(`[tessera] Could not load video metadata for ${videoId}`)
     }
 
     const ratePerSecond = (await settingsManager.getSetting('base-rate-per-second')) as string || '0.0001'

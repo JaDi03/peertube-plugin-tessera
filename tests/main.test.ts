@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { register } from '../src/main'
 
-describe('PeerTube Plugin Arc-Cashier - Server', () => {
+describe('PeerTube Plugin Tessera - Server', () => {
   it('should register settings and ping router', async () => {
     // Mock the settings manager
     const settingsManager = {

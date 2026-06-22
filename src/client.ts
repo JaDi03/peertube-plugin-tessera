@@ -3,7 +3,7 @@ import { RegisterClientOptions } from '@peertube/peertube-types/client'
 export async function register (options: RegisterClientOptions) {
   const { peertubeHelpers, registerHook } = options
 
-  // 1. Fetch Arc-Cashier Base URL from plugin router
+  // 1. Fetch Tessera Base URL from plugin router
   let baseUrl: string
   try {
     const pluginRoute = peertubeHelpers.getBaseRouterRoute()
@@ -12,11 +12,11 @@ export async function register (options: RegisterClientOptions) {
     if (data.baseUrl) {
       baseUrl = data.baseUrl
     } else {
-      console.warn('[arc-cashier] Missing base URL configuration.')
+      console.warn('[tessera] Missing base URL configuration.')
       return
     }
   } catch (err) {
-    console.error('[arc-cashier] Failed to fetch base URL:', err)
+    console.error('[tessera] Failed to fetch base URL:', err)
     return
   }
 
@@ -33,7 +33,7 @@ export async function register (options: RegisterClientOptions) {
   `
   document.head.appendChild(style)
 
-  // 2. Inject Arc-Cashier paywall assets dynamically
+  // 2. Inject Tessera paywall assets dynamically
   const cssLink = document.createElement('link')
   cssLink.rel = 'stylesheet'
   cssLink.href = `${baseUrl}/peertube-assets/paywall.css`
@@ -77,17 +77,17 @@ export async function register (options: RegisterClientOptions) {
           })
           if (!response.ok) {
               if (response.status === 401) {
-                  console.warn('[arc-cashier] Unauthenticated. Stopping ping loop.')
+                  console.warn('[tessera] Unauthenticated. Stopping ping loop.')
                   if (pingInterval) {
                       clearInterval(pingInterval)
                       pingInterval = undefined
                   }
               } else if (response.status === 429) {
-                  console.warn('[arc-cashier] Rate limited. Skipping this ping.')
+                  console.warn('[tessera] Rate limited. Skipping this ping.')
               }
           }
       } catch (err) {
-          console.error('[arc-cashier] Failed to send ping:', err)
+          console.error('[tessera] Failed to send ping:', err)
       }
   }
 

@@ -1,4 +1,4 @@
-# Contributing to Arc-Cashier PeerTube Plugin
+# Contributing to Tessera PeerTube Plugin
 
 Thank you for your interest in contributing!
 
