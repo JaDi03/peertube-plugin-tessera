@@ -1,4 +1,4 @@
-# peertube-plugin-arc-cashier
+# peertube-plugin-tessera
 
 <div align="center">
   <!-- Row 1: Status Badges -->
@@ -13,21 +13,21 @@
   <img src="https://img.shields.io/badge/PeerTube-F2690D?style=for-the-badge&logo=peertube&logoColor=white" alt="PeerTube">
 </div>
 
-*Official PeerTube companion plugin for Arc-Cashier enabling high-fidelity per-second billing.*
+*Official PeerTube companion plugin for Tessera enabling high-fidelity per-second billing.*
 
-> **TL;DR:** Injects the Arc-Cashier paywall directly into the PeerTube player and tracks user watch time via continuous server pings. This enables a seamless per-second billing integration for decentralized video hosting.
+> **TL;DR:** Injects the Tessera paywall directly into the PeerTube player and tracks user watch time via continuous server pings. This enables a seamless per-second billing integration for decentralized video hosting.
 
 ---
 
-## 🔗 What is Arc-Cashier?
+## 🔗 What is Tessera?
 
 > [!WARNING]
 > **Companion Plugin Only**
-> This plugin does not process payments or manage blockchain transactions by itself. It is specifically built as a **companion bridge** for Arc-Cashier.
+> This plugin does not process payments or manage blockchain transactions by itself. It is specifically built as a **companion bridge** for Tessera.
 
-[**Arc-Cashier**](https://github.com/JaDi03/Arc-Cashier) is an open-source sidecar billing engine that enables Web3 per-second streaming payments (using Circle USDC) for self-hosted platforms. 
+[**Tessera**](https://github.com/JaDi03/Tessera) is an open-source sidecar billing engine that enables Web3 per-second streaming payments (using Circle USDC) for self-hosted platforms. 
 
-To use this PeerTube plugin, you **MUST** have an instance of Arc-Cashier running. The plugin acts as a reporter, sending high-fidelity presence webhooks (`viewer_joined`, `viewer_left`) with complete video metadata to your Arc-Cashier backend, which then handles all the actual billing logic and paywall asset delivery.
+To use this PeerTube plugin, you **MUST** have an instance of Tessera running. The plugin acts as a reporter, sending high-fidelity presence webhooks (`viewer_joined`, `viewer_left`) with complete video metadata to your Tessera backend, which then handles all the actual billing logic and paywall asset delivery.
 
 ---
 
@@ -60,16 +60,16 @@ This plugin consists of two main pieces: a server-side route for configuration a
 sequenceDiagram
     participant Browser
     participant PluginServer as PeerTube Plugin
-    participant ArcCashier as Arc-Cashier Engine
+    participant TesseraEngine as Tessera Engine
     
     Browser->>PluginServer: GET /base-url
     PluginServer-->>Browser: { baseUrl: "https://api.your-arc.com" }
-    Browser->>ArcCashier: Fetch paywall.js & paywall.css
+    Browser->>TesseraEngine: Fetch paywall.js & paywall.css
     
     Note over Browser: User clicks Play
     Browser->>PluginServer: POST /ping { action: "start", videoId: "..." }
     PluginServer->>PluginServer: Authenticate User & Validate Metadata
-    PluginServer->>ArcCashier: POST webhook (viewer_joined) [HMAC Signed]
+    PluginServer->>TesseraEngine: POST webhook (viewer_joined) [HMAC Signed]
     
     loop Every 15 seconds
         Browser->>PluginServer: POST /ping { action: "ping", videoId: "..." }
@@ -78,13 +78,13 @@ sequenceDiagram
     
     Note over Browser: User navigates away or clicks Pause
     Browser->>PluginServer: POST /ping { action: "stop", videoId: "..." }
-    PluginServer->>ArcCashier: POST webhook (viewer_left) [HMAC Signed]
+    PluginServer->>TesseraEngine: POST webhook (viewer_left) [HMAC Signed]
 ```
 
-1. **Initialization**: The client script fetches the paywall assets directly from the remote Arc-Cashier instance.
-2. **Session Start**: When playback begins, a ping is sent to the plugin server, which authenticates the user natively and emits a HMAC-signed webhook to Arc-Cashier.
+1. **Initialization**: The client script fetches the paywall assets directly from the remote Tessera instance.
+2. **Session Start**: When playback begins, a ping is sent to the plugin server, which authenticates the user natively and emits a HMAC-signed webhook to Tessera.
 3. **Tracking**: Pings maintain the user session active. The server limits request rates to prevent abuse.
-4. **Session End**: Navigating away, pausing, or closing the tab causes a final `stop` ping or a garbage-collection timeout to safely notify Arc-Cashier.
+4. **Session End**: Navigating away, pausing, or closing the tab causes a final `stop` ping or a garbage-collection timeout to safely notify Tessera.
 
 ---
 
@@ -95,7 +95,7 @@ sequenceDiagram
 https://github.com/user-attachments/assets/efba151f-25e5-4e4c-9669-6191a2d7b600
 
 **Backend Verification & On-Chain Settlement**  
-While the viewer watches the PeerTube video, the companion Arc-Cashier backend silently validates x402 signatures every second. Once the viewer leaves, the unused balance is instantly refunded on the Arc Testnet via Circle CCTP.
+While the viewer watches the PeerTube video, the companion Tessera backend silently validates x402 signatures every second. Once the viewer leaves, the unused balance is instantly refunded on the Arc Testnet via Circle CCTP.
 
 <p align="center">
   <img src="media/terminal.PNG" alt="Terminal Logs" width="48%">
@@ -124,8 +124,8 @@ To install this plugin on a production PeerTube instance, you first need to pack
 Run these commands on your local machine to compile the TypeScript and generate the tarball:
 
 ```bash
-git clone https://github.com/JaDi03/peertube-plugin-arc-cashier.git
-cd peertube-plugin-arc-cashier
+git clone https://github.com/JaDi03/peertube-plugin-tessera.git
+cd peertube-plugin-tessera
 npm install
 npm run build
 npm pack
@@ -146,14 +146,14 @@ If you are developing locally with Docker (`docker-peertube-peertube-1`):
 npm run build && npm pack
 
 # 2. Transfer tarball
-docker exec docker-peertube-peertube-1 sh -c "rm -rf /tmp/peertube-plugin-arc-cashier*"
-docker cp peertube-plugin-arc-cashier-1.0.9.tgz docker-peertube-peertube-1:/tmp/
+docker exec docker-peertube-peertube-1 sh -c "rm -rf /tmp/peertube-plugin-tessera*"
+docker cp peertube-plugin-tessera-1.0.9.tgz docker-peertube-peertube-1:/tmp/
 
 # 3. Extract and Install
 docker exec docker-peertube-peertube-1 sh -c "
-  mkdir -p /tmp/peertube-plugin-arc-cashier && 
-  tar -xzf /tmp/peertube-plugin-arc-cashier-1.0.9.tgz -C /tmp/peertube-plugin-arc-cashier --strip-components=1 &&
-  npm run plugin:install -- --plugin-path /tmp/peertube-plugin-arc-cashier
+  mkdir -p /tmp/peertube-plugin-tessera && 
+  tar -xzf /tmp/peertube-plugin-tessera-1.0.9.tgz -C /tmp/peertube-plugin-tessera --strip-components=1 &&
+  npm run plugin:install -- --plugin-path /tmp/peertube-plugin-tessera
 "
 
 # 4. Restart PeerTube
@@ -162,8 +162,8 @@ docker restart docker-peertube-peertube-1
 
 ### 4. Configuration
 Once installed, click on the **Settings** button next to the plugin to configure the connection:
-- **WebhookUrl**: The full API route of your Arc-Cashier instance (e.g., `https://api.yourdomain.com/api/connectors/peertube/webhook`).
-- **WebhookSecret**: The cryptographically secure string matching your `.env` configuration in Arc-Cashier.
+- **WebhookUrl**: The full API route of your Tessera instance (e.g., `https://api.yourdomain.com/api/connectors/peertube/webhook`).
+- **WebhookSecret**: The cryptographically secure string matching your `.env` configuration in Tessera.
 - **Max Active Viewers**: Soft limit for concurrent active memory sessions (Default: `10000`) to enforce LRU cache boundaries.
 
 ---
@@ -171,7 +171,7 @@ Once installed, click on the **Settings** button next to the plugin to configure
 ## 🏗️ Project Structure
 
 ```text
-peertube-plugin-arc-cashier/
+peertube-plugin-tessera/
 ├── .github/workflows/       # CI pipelines
 ├── src/
 │   ├── client.ts            # Client-side injected logic (Paywall & Events)
@@ -190,10 +190,10 @@ To ensure high availability and prevent abuse in decentralized environments, the
 
 - **LRU Memory Protection**: The plugin limits active sessions in memory using the `max-active-viewers` setting. Older inactive sessions are automatically evicted if a surge occurs, prioritizing new connections while performing best-effort `viewer_left` notifications.
 - **Rate Limiting**: To prevent DDoS on the plugin's internal `/ping` router, the backend enforces a hard limit of 1 ping every 5 seconds per authenticated user.
-- **Ghost Session Collection**: The internal garbage collector awaits confirmation from the Arc-Cashier webhook before removing a session from memory. If the connection fails, it defers removal to retry on the next cycle, ensuring no billing session is left stranded indefinitely.
+- **Ghost Session Collection**: The internal garbage collector awaits confirmation from the Tessera webhook before removing a session from memory. If the connection fails, it defers removal to retry on the next cycle, ensuring no billing session is left stranded indefinitely.
 - **💸 Transparent Limitations**: 
   - Unauthenticated users will hit a `401 Unauthorized` block on `/ping`. This effectively locks them out of paid content natively.
-  - Relying exclusively on HTTP webhooks means that if the Arc-Cashier server suffers extended downtime, PeerTube's memory buffer may fill up and evict sessions without final billing confirmation. It is crucial to maintain high uptime on the Arc-Cashier end.
+  - Relying exclusively on HTTP webhooks means that if the Tessera server suffers extended downtime, PeerTube's memory buffer may fill up and evict sessions without final billing confirmation. It is crucial to maintain high uptime on the Tessera end.
 
 ---
 
