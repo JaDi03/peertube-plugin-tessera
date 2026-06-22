@@ -165,6 +165,12 @@ Once installed, click on the **Settings** button next to the plugin to configure
 - **WebhookUrl**: The full API route of your Tessera instance (e.g., `https://api.yourdomain.com/api/connectors/peertube/webhook`).
 - **WebhookSecret**: The cryptographically secure string matching your `.env` configuration in Tessera.
 - **Max Active Viewers**: Soft limit for concurrent active memory sessions (Default: `10000`) to enforce LRU cache boundaries.
+- **Base Rate Per Second**: The default payment rate in USDC for videos that do not have a specific price set (e.g., `0.0001`).
+
+### 5. Per-Video Monetization Settings
+You can override the global billing settings on a per-video basis. When uploading or editing a video, look for the **Plugin Settings** tab to configure:
+- **Tessera Monetization Mode**: Choose between `⚡ Pay-per-second` or `💝 Tips (free to watch)`.
+- **Rate per second (USDC)**: Set a custom price for this specific video.
 
 ---
 
