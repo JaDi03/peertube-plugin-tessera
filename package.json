@@ -1,6 +1,6 @@
 {
   "name": "peertube-plugin-tessera",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Tessera integration for PeerTube for per-second billing",
   "engine": {
     "peertube": ">= 6.0.0"
