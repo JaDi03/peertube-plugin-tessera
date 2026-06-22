@@ -68,7 +68,7 @@ export async function register (options: RegisterClientOptions) {
   document.head.appendChild(cssLink)
 
   const script = document.createElement('script')
-  script.src = `${baseUrl}/peertube-assets/paywall.js`
+  script.src = `${baseUrl}/peertube-assets/paywall.bundle.js`
   document.head.appendChild(script)
 
   // 4. Helper to get videoId from URL
