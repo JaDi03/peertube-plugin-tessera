@@ -3,7 +3,7 @@
 <div align="center">
   <!-- Row 1: Status Badges -->
   <img src="https://img.shields.io/badge/Build-Passing-brightgreen?style=for-the-badge" alt="Build Status">
-  <img src="https://img.shields.io/badge/Version-1.0.9-blue?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-1.0.10-blue?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-Apache_2.0-green?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/Node->=18-yellow?style=for-the-badge" alt="Node Version">
   <br>
@@ -147,12 +147,12 @@ npm run build && npm pack
 
 # 2. Transfer tarball
 docker exec docker-peertube-peertube-1 sh -c "rm -rf /tmp/peertube-plugin-tessera*"
-docker cp peertube-plugin-tessera-1.0.9.tgz docker-peertube-peertube-1:/tmp/
+docker cp peertube-plugin-tessera-1.0.10.tgz docker-peertube-peertube-1:/tmp/
 
 # 3. Extract and Install
 docker exec docker-peertube-peertube-1 sh -c "
   mkdir -p /tmp/peertube-plugin-tessera && 
-  tar -xzf /tmp/peertube-plugin-tessera-1.0.9.tgz -C /tmp/peertube-plugin-tessera --strip-components=1 &&
+  tar -xzf /tmp/peertube-plugin-tessera-1.0.10.tgz -C /tmp/peertube-plugin-tessera --strip-components=1 &&
   npm run plugin:install -- --plugin-path /tmp/peertube-plugin-tessera
 "
 
