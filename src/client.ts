@@ -58,6 +58,11 @@ export async function register (options: RegisterClientOptions) {
     body.arc-hide-paywall #arc-session-manager {
        display: none !important;
     }
+    body.arc-locked.arc-hide-paywall > * {
+       filter: none !important;
+       pointer-events: auto !important;
+       user-select: auto !important;
+    }
   `
   document.head.appendChild(style)
 
@@ -211,5 +216,5 @@ export async function register (options: RegisterClientOptions) {
       }
       sendPing('stop')
     }
-  }, 1000)
+  }, 200)
 }
