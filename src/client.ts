@@ -11,6 +11,34 @@ declare global {
   }
 }
 
+function extractTesseraPluginData (pluginData: unknown): Record<string, string> {
+  if (!pluginData) return {}
+  let pData: unknown = pluginData
+  if (typeof pData === 'string') {
+    try { pData = JSON.parse(pData) } catch { return {} }
+  }
+  if (typeof pData !== 'object' || pData === null) return {}
+
+  const record = pData as Record<string, unknown>
+  if (typeof record['tessera-wallet'] === 'string') {
+    return record as Record<string, string>
+  }
+
+  for (const ns of ['peertube-plugin-tessera', 'tessera']) {
+    const nested = record[ns]
+    if (nested && typeof nested === 'object') {
+      return nested as Record<string, string>
+    }
+  }
+
+  return record as Record<string, string>
+}
+
+function readWalletFromVideo (video: { pluginData?: unknown } | null | undefined): string | null {
+  const wallet = extractTesseraPluginData(video?.pluginData)['tessera-wallet']?.trim()
+  return wallet || null
+}
+
 
 
 export async function register (options: RegisterClientOptions) {
@@ -119,12 +147,8 @@ export async function register (options: RegisterClientOptions) {
   let creatorPanelEl: HTMLElement | null = null
 
   const isVideoOwner = (): boolean => {
-    if (!peertubeHelpers.isLoggedIn()) {
-      console.log('[tessera-debug] isVideoOwner: Not logged in.')
-      return false
-    }
+    if (!peertubeHelpers.isLoggedIn()) return false
     const user = peertubeHelpers.getUser()
-    console.log(`[tessera-debug] isVideoOwner check -> Logged in as: ${user?.username}, Video owner is: ${currentVideoOwner}`)
     if (!user?.username || !currentVideoOwner) return false
     return user.username.toLowerCase() === currentVideoOwner.toLowerCase()
   }
@@ -268,7 +292,6 @@ export async function register (options: RegisterClientOptions) {
     const isOwner = isVideoOwner()
 
     if (!isWatchPage || !wallet || !isOwner) {
-      console.log(`[tessera-debug] renderCreatorPanel skipping. isWatchPage: ${isWatchPage}, wallet: ${wallet || 'missing'}, isOwner: ${isOwner}`)
       if (creatorPanelEl) {
         creatorPanelEl.remove()
         creatorPanelEl = null
@@ -379,30 +402,42 @@ export async function register (options: RegisterClientOptions) {
     void updateCreatorPanelBalance(wallet)
   }
 
+  const loadCreatorWalletForVideo = async (video: { pluginData?: unknown } | null | undefined, videoId: string | null) => {
+    currentCreatorWallet = readWalletFromVideo(video)
+
+    if (currentCreatorWallet) {
+      renderCreatorPanel()
+      return
+    }
+
+    if (!videoId) {
+      renderCreatorPanel()
+      return
+    }
+
+    try {
+      const pluginRoute = peertubeHelpers.getBaseRouterRoute()
+      const res = await fetch(`${pluginRoute}/video/${videoId}/tessera-data`)
+      const data = await res.json()
+      if (res.ok && data.wallet) {
+        currentCreatorWallet = data.wallet
+      }
+    } catch (err) {
+      console.error('[tessera] Failed to fetch creator wallet:', err)
+    }
+
+    renderCreatorPanel()
+  }
+
   registerHook({
     target: 'action:video-watch.video.loaded',
     handler: async (params: any) => {
       if (params && params.video) {
         currentVideoId = params.video.uuid || params.video.id?.toString() || null
         currentVideoOwner = params.video.account?.name || params.video.channel?.ownerAccount?.name || null
-        
-        // Immediate visibility check to prevent modal flicker
-        checkPageVisibility()
 
-        // Fetch wallet from backend plugin router because frontend params.video doesn't include it
-        if (currentVideoId) {
-            const pluginRoute = peertubeHelpers.getBaseRouterRoute()
-            try {
-                const res = await fetch(`${pluginRoute}/video/${currentVideoId}/tessera-data`)
-                const data = await res.json()
-                currentCreatorWallet = data.wallet || null
-            } catch (err) {
-                console.error('[tessera] Failed to fetch creator wallet:', err)
-                currentCreatorWallet = null
-            }
-        }
-        
-        renderCreatorPanel()
+        checkPageVisibility()
+        await loadCreatorWalletForVideo(params.video, currentVideoId)
       }
     }
   })
@@ -560,7 +595,6 @@ export async function register (options: RegisterClientOptions) {
   // Fallback DOM polling to detect video element creation
   setInterval(async () => {
     checkPageVisibility()
-    renderCreatorPanel()
 
     // Specifically target the main Video.js player to avoid grabbing thumbnail preview videos
     const video = document.querySelector('.vjs-tech, .video-js video, video-player video') as HTMLVideoElement | null

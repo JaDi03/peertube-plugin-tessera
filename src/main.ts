@@ -12,13 +12,64 @@ interface TesseraPluginData {
 
 function extractTesseraPluginData (pluginData: unknown): TesseraPluginData {
   if (!pluginData) return {}
-  let pData = pluginData
+  let pData: unknown = pluginData
   if (typeof pData === 'string') {
     try { pData = JSON.parse(pData) } catch { return {} }
   }
   if (typeof pData !== 'object' || pData === null) return {}
-  const record = pData as Record<string, TesseraPluginData>
-  return record['peertube-plugin-tessera'] || record
+
+  const record = pData as Record<string, unknown>
+  if (typeof record['tessera-wallet'] === 'string' || typeof record['tessera-mode'] === 'string') {
+    return record as TesseraPluginData
+  }
+
+  for (const ns of ['peertube-plugin-tessera', 'tessera']) {
+    const nested = record[ns]
+    if (nested && typeof nested === 'object') {
+      return nested as TesseraPluginData
+    }
+  }
+
+  return record as TesseraPluginData
+}
+
+function storageKey (field: keyof TesseraPluginData, videoId: number): string {
+  return `${field}-${videoId}`
+}
+
+async function persistTesseraVideoData (
+  storageManager: { storeData: (key: string, data: unknown) => Promise<unknown> },
+  videoId: number,
+  data: TesseraPluginData
+): Promise<void> {
+  if (data['tessera-wallet']?.trim()) {
+    await storageManager.storeData(storageKey('tessera-wallet', videoId), data['tessera-wallet'].trim())
+  }
+  if (data['tessera-mode']) {
+    await storageManager.storeData(storageKey('tessera-mode', videoId), data['tessera-mode'])
+  }
+  if (data['tessera-rate']) {
+    await storageManager.storeData(storageKey('tessera-rate', videoId), data['tessera-rate'])
+  }
+}
+
+async function loadTesseraVideoData (
+  storageManager: { getData: <T = unknown>(key: string) => Promise<T | undefined> },
+  videoId: number,
+  pluginData?: unknown
+): Promise<TesseraPluginData> {
+  const fromRequest = extractTesseraPluginData(pluginData)
+  const [wallet, mode, rate] = await Promise.all([
+    storageManager.getData<string>(storageKey('tessera-wallet', videoId)),
+    storageManager.getData<string>(storageKey('tessera-mode', videoId)),
+    storageManager.getData<string>(storageKey('tessera-rate', videoId)),
+  ])
+
+  return {
+    'tessera-wallet': wallet || fromRequest['tessera-wallet'],
+    'tessera-mode': mode || fromRequest['tessera-mode'],
+    'tessera-rate': rate || fromRequest['tessera-rate'],
+  }
 }
 
 function validateTesseraWallet (pluginData: unknown): string | null {
@@ -59,7 +110,7 @@ const enqueueAction = async (userId: string, action: () => Promise<any>): Promis
 }
 
 export async function register (options: RegisterServerOptions) {
-  const { registerSetting, settingsManager, getRouter, peertubeHelpers, registerHook } = options
+  const { registerSetting, settingsManager, getRouter, peertubeHelpers, registerHook, storageManager } = options
 
   // 5.2: Cache base URL to prevent abuse
   let cachedBaseUrl: string | null = null
@@ -255,6 +306,51 @@ export async function register (options: RegisterServerOptions) {
     handler: rejectUploadIfWalletInvalid as any
   })
 
+  const syncTesseraVideoData = async (video: { id?: number }, req?: { body?: { pluginData?: unknown; pluginDataString?: unknown } }) => {
+    if (!video?.id) return
+    const pluginData = req?.body?.pluginData || req?.body?.pluginDataString
+    const data = extractTesseraPluginData(pluginData)
+    if (data['tessera-wallet'] || data['tessera-mode'] || data['tessera-rate']) {
+      await persistTesseraVideoData(storageManager, video.id, data)
+    }
+  }
+
+  registerHook({
+    target: 'action:api.video.uploaded',
+    handler: (({ video, req }: { video?: { id?: number }; req?: { body?: { pluginData?: unknown } } }) => {
+      return syncTesseraVideoData(video || {}, req)
+    }) as () => unknown
+  })
+
+  registerHook({
+    target: 'action:api.video.updated',
+    handler: (({ video, req }: { video?: { id?: number }; req?: { body?: { pluginData?: unknown } } }) => {
+      return syncTesseraVideoData(video || {}, req)
+    }) as () => unknown
+  })
+
+  registerHook({
+    target: 'filter:api.video.get.result',
+    handler: (async (video: { id?: number; pluginData?: Record<string, unknown> }) => {
+      if (!video?.id) return video
+
+      const fromApi = extractTesseraPluginData(video.pluginData)
+      if (fromApi['tessera-wallet'] || fromApi['tessera-mode'] || fromApi['tessera-rate']) {
+        await persistTesseraVideoData(storageManager, video.id, fromApi)
+      }
+
+      const stored = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
+      if (stored['tessera-wallet'] || stored['tessera-mode'] || stored['tessera-rate']) {
+        if (!video.pluginData) video.pluginData = {}
+        if (stored['tessera-wallet']) video.pluginData['tessera-wallet'] = stored['tessera-wallet']
+        if (stored['tessera-mode']) video.pluginData['tessera-mode'] = stored['tessera-mode']
+        if (stored['tessera-rate']) video.pluginData['tessera-rate'] = stored['tessera-rate']
+      }
+
+      return video
+    }) as () => unknown
+  })
+
   // 2. Set up internal router
   const router = getRouter()
 
@@ -274,14 +370,15 @@ export async function register (options: RegisterServerOptions) {
   router.get('/video/:id/tessera-data', async (req: any, res: any) => {
     const videoId = req.params.id
     try {
-      const video = await peertubeHelpers.videos.loadByIdOrUUID(videoId) as any
-      if (!video) return res.status(404).json({ error: 'Video not found' })
-      let wallet = null
-      if (video.pluginData) {
-         const myData = extractTesseraPluginData(video.pluginData)
-         wallet = myData['tessera-wallet'] || null
-      }
-      res.json({ wallet })
+      const video = await peertubeHelpers.videos.loadByIdOrUUID(videoId) as { id?: number; pluginData?: unknown }
+      if (!video?.id) return res.status(404).json({ error: 'Video not found' })
+
+      const data = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
+      res.json({
+        wallet: data['tessera-wallet'] || null,
+        mode: data['tessera-mode'] || null,
+        rate: data['tessera-rate'] || null,
+      })
     } catch (err) {
       peertubeHelpers.logger.warn(`[tessera] Error fetching video data for ${videoId}: ${err}`)
       res.status(500).json({ error: 'Internal server error' })
@@ -335,8 +432,8 @@ export async function register (options: RegisterServerOptions) {
         if (video.Account) {
           accountName = video.Account.name || video.Account.displayName || ''
         }
-        if (video.pluginData) {
-          const myData = extractTesseraPluginData(video.pluginData)
+        if (video.id) {
+          const myData = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
           if (myData['tessera-mode']) tesseraMode = myData['tessera-mode']
           if (myData['tessera-rate']) tesseraRate = myData['tessera-rate']
           if (myData['tessera-wallet']) tesseraWallet = myData['tessera-wallet']
