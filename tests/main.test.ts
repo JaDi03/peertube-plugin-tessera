@@ -8,9 +8,9 @@ describe('PeerTube Plugin Tessera - Server', () => {
       getSetting: vi.fn().mockResolvedValue('test-value')
     }
     
-    // Mock the options passed by PeerTube
-    const options = {
+    const options: any = {
       registerSetting: vi.fn(),
+      registerHook: vi.fn(),
       settingsManager,
       getRouter: vi.fn(() => ({
         get: vi.fn(),
