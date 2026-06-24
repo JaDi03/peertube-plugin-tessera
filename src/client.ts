@@ -1,7 +1,47 @@
 import { RegisterClientOptions } from '@peertube/peertube-types/client'
 
+const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
+const ARC_CHAIN_ID = '0x4cef52'
+
+declare global {
+  interface Window {
+    ethereum?: {
+      request: (args: { method: string; params?: unknown[] | unknown }) => Promise<unknown>
+    }
+  }
+}
+
+function extractTesseraPluginData (pluginData: unknown): Record<string, string> {
+  if (!pluginData) return {}
+  let pData = pluginData
+  if (typeof pData === 'string') {
+    try { pData = JSON.parse(pData) } catch { return {} }
+  }
+  if (typeof pData !== 'object' || pData === null) return {}
+  const record = pData as Record<string, unknown>
+  const nested = record['peertube-plugin-tessera']
+  if (nested && typeof nested === 'object') {
+    return nested as Record<string, string>
+  }
+  return record as Record<string, string>
+}
+
 export async function register (options: RegisterClientOptions) {
   const { peertubeHelpers, registerHook, registerVideoField } = options
+
+  const validateWalletField = async ({ formValues }: { formValues?: Record<string, string> }) => {
+    const mode = formValues?.['tessera-mode'] || 'pay-per-second'
+    if (mode === 'tips') return { error: false }
+
+    const wallet = (formValues?.['tessera-wallet'] || '').trim()
+    if (!wallet) {
+      return { error: true, text: 'Creator wallet is required for pay-per-second mode.' }
+    }
+    if (!EVM_ADDRESS_RE.test(wallet)) {
+      return { error: true, text: 'Enter a valid EVM address (0x + 40 hex chars).' }
+    }
+    return { error: false }
+  }
 
   // 1. Register custom fields in video upload/edit form IMMEDIATELY (synchronously)
   // This must happen before any await to avoid race conditions with PeerTube's form rendering
@@ -29,6 +69,16 @@ export async function register (options: RegisterClientOptions) {
       }
       registerVideoField(rateField, { type: 'upload' })
       registerVideoField(rateField, { type: 'update' })
+
+      const walletField = {
+        name: 'tessera-wallet',
+        label: 'Creator Wallet Address (Polygon/EVM)',
+        type: 'input' as const,
+        descriptionHTML: 'Your public wallet address on Arc/Polygon/EVM. You will receive USDC earnings here and withdraw via MetaMask.',
+        error: validateWalletField
+      }
+      registerVideoField(walletField, { type: 'upload' })
+      registerVideoField(walletField, { type: 'update' })
   }
 
   // 2. Fetch Tessera Base URL from plugin router
@@ -97,12 +147,234 @@ export async function register (options: RegisterClientOptions) {
 
   // 4. Helper to get videoId from URL
   let currentVideoId: string | null = null
+  let currentVideoOwner: string | null = null
+  let currentCreatorWallet: string | null = null
+  let creatorPanelEl: HTMLElement | null = null
+
+  const isVideoOwner = (): boolean => {
+    if (!peertubeHelpers.isLoggedIn()) return false
+    const user = peertubeHelpers.getUser()
+    if (!user?.username || !currentVideoOwner) return false
+    return user.username.toLowerCase() === currentVideoOwner.toLowerCase()
+  }
+
+  const ensureArcNetwork = async (): Promise<void> => {
+    if (!window.ethereum) throw new Error('MetaMask not detected')
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: ARC_CHAIN_ID }]
+      })
+    } catch (err: any) {
+      if (err?.code === 4902) {
+        await window.ethereum.request({
+          method: 'wallet_addEthereumChain',
+          params: [{
+            chainId: ARC_CHAIN_ID,
+            chainName: 'Arc Testnet',
+            nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
+            rpcUrls: ['https://rpc.testnet.arc.network']
+          }]
+        })
+      } else {
+        throw err
+      }
+    }
+  }
+
+  const connectCreatorWallet = async (expectedWallet: string): Promise<string> => {
+    if (!window.ethereum) throw new Error('Install MetaMask to withdraw earnings.')
+    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' }) as string[]
+    const connected = accounts[0]
+    if (!connected) throw new Error('No MetaMask account selected.')
+    if (connected.toLowerCase() !== expectedWallet.toLowerCase()) {
+      throw new Error(`Connect the wallet configured for this video (${expectedWallet}).`)
+    }
+    await ensureArcNetwork()
+    return connected
+  }
+
+  const updateCreatorPanelBalance = async (wallet: string) => {
+    if (!creatorPanelEl) return
+    const balanceEl = creatorPanelEl.querySelector('[data-tessera-balance]') as HTMLElement | null
+    if (balanceEl) balanceEl.textContent = 'Loading…'
+    try {
+      const res = await fetch(`${baseUrl}/api/core/creator/balance?address=${encodeURIComponent(wallet)}`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Balance fetch failed')
+      if (balanceEl) {
+        balanceEl.textContent = `$${Number(data.gatewayAvailable || 0).toFixed(4)} USDC`
+      }
+    } catch (err: any) {
+      if (balanceEl) balanceEl.textContent = err?.message || 'Error'
+    }
+  }
+
+  const withdrawCreatorEarnings = async (wallet: string) => {
+    await connectCreatorWallet(wallet)
+
+    const prepareRes = await fetch(`${baseUrl}/api/core/creator/prepare-withdraw`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address: wallet })
+    })
+    const prepareData = await prepareRes.json()
+    if (!prepareRes.ok) throw new Error(prepareData.error || 'Could not prepare withdrawal')
+    if (prepareData.status === 'no_funds') {
+      peertubeHelpers.notifier.info('No withdrawable balance in Gateway yet.')
+      return
+    }
+
+    const signature = await window.ethereum!.request({
+      method: 'eth_signTypedData_v4',
+      params: [wallet, JSON.stringify(prepareData.typedData)]
+    }) as string
+
+    const completeRes = await fetch(`${baseUrl}/api/core/creator/complete-withdraw`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        address: wallet,
+        burnIntent: prepareData.burnIntent,
+        signature
+      })
+    })
+    const completeData = await completeRes.json()
+    if (!completeRes.ok) throw new Error(completeData.error || 'Withdraw attestation failed')
+
+    const txHash = await window.ethereum!.request({
+      method: 'eth_sendTransaction',
+      params: [completeData.txRequest]
+    }) as string
+
+    peertubeHelpers.notifier.success(`Withdrawal submitted! Tx: ${txHash.slice(0, 10)}…`)
+    await updateCreatorPanelBalance(wallet)
+  }
+
+  const renderCreatorPanel = () => {
+    const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/')
+    const wallet = currentCreatorWallet?.trim()
+
+    if (!isWatchPage || !wallet || !isVideoOwner()) {
+      if (creatorPanelEl) {
+        creatorPanelEl.remove()
+        creatorPanelEl = null
+      }
+      return
+    }
+
+    if (creatorPanelEl) {
+      const walletEl = creatorPanelEl.querySelector('.tessera-wallet')
+      if (walletEl && walletEl.textContent !== wallet) {
+        creatorPanelEl.remove()
+        creatorPanelEl = null
+      } else {
+        return
+      }
+    }
+
+    creatorPanelEl = document.createElement('div')
+    creatorPanelEl.id = 'tessera-creator-panel'
+    creatorPanelEl.innerHTML = `
+      <style>
+        #tessera-creator-panel {
+          position: fixed;
+          bottom: 20px;
+          right: 20px;
+          z-index: 10050;
+          background: rgba(17, 24, 39, 0.95);
+          color: #f7fafc;
+          border: 1px solid rgba(99, 179, 237, 0.35);
+          border-radius: 12px;
+          padding: 14px 16px;
+          min-width: 240px;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+          font-family: system-ui, -apple-system, sans-serif;
+        }
+        #tessera-creator-panel h4 {
+          margin: 0 0 8px;
+          font-size: 13px;
+          font-weight: 600;
+          color: #90cdf4;
+        }
+        #tessera-creator-panel .tessera-wallet {
+          font-size: 10px;
+          color: #a0aec0;
+          word-break: break-all;
+          margin-bottom: 10px;
+        }
+        #tessera-creator-panel .tessera-balance {
+          font-size: 18px;
+          font-weight: 700;
+          margin-bottom: 12px;
+        }
+        #tessera-creator-panel button {
+          width: 100%;
+          margin-top: 6px;
+          padding: 8px 10px;
+          border: none;
+          border-radius: 8px;
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 600;
+        }
+        #tessera-creator-panel .btn-balance {
+          background: #2b6cb0;
+          color: white;
+        }
+        #tessera-creator-panel .btn-withdraw {
+          background: #38a169;
+          color: white;
+        }
+        #tessera-creator-panel button:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+      </style>
+      <h4>Tessera Earnings</h4>
+      <div class="tessera-wallet">${wallet}</div>
+      <div class="tessera-balance" data-tessera-balance>—</div>
+      <button type="button" class="btn-balance" data-action="balance">Revisar Saldo</button>
+      <button type="button" class="btn-withdraw" data-action="withdraw">Reclamar Ganancias</button>
+    `
+
+    creatorPanelEl.querySelector('[data-action="balance"]')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget as HTMLButtonElement
+      btn.disabled = true
+      try {
+        await updateCreatorPanelBalance(wallet)
+      } catch (err: any) {
+        peertubeHelpers.notifier.error(err?.message || 'Balance check failed')
+      } finally {
+        btn.disabled = false
+      }
+    })
+
+    creatorPanelEl.querySelector('[data-action="withdraw"]')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget as HTMLButtonElement
+      btn.disabled = true
+      try {
+        await withdrawCreatorEarnings(wallet)
+      } catch (err: any) {
+        peertubeHelpers.notifier.error(err?.message || 'Withdraw failed')
+      } finally {
+        btn.disabled = false
+      }
+    })
+
+    document.body.appendChild(creatorPanelEl)
+    void updateCreatorPanelBalance(wallet)
+  }
 
   registerHook({
     target: 'action:video-watch.video.loaded',
     handler: (params: any) => {
       if (params && params.video) {
         currentVideoId = params.video.uuid || params.video.id?.toString() || null
+        currentVideoOwner = params.video.account?.name || params.video.channel?.ownerAccount?.name || null
+        const pluginData = extractTesseraPluginData(params.video.pluginData)
+        currentCreatorWallet = pluginData['tessera-wallet'] || null
+        renderCreatorPanel()
       }
     }
   })
@@ -260,6 +532,7 @@ export async function register (options: RegisterClientOptions) {
   // Fallback DOM polling to detect video element creation
   setInterval(async () => {
     checkPageVisibility()
+    renderCreatorPanel()
 
     // Specifically target the main Video.js player to avoid grabbing thumbnail preview videos
     const video = document.querySelector('.vjs-tech, .video-js video, video-player video') as HTMLVideoElement | null

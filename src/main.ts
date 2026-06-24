@@ -2,6 +2,39 @@ import * as crypto from 'crypto'
 import { RegisterServerOptions } from '@peertube/peertube-types'
 
 const TIMEOUT_MS = 30000
+const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
+
+interface TesseraPluginData {
+  'tessera-mode'?: string
+  'tessera-rate'?: string
+  'tessera-wallet'?: string
+}
+
+function extractTesseraPluginData (pluginData: unknown): TesseraPluginData {
+  if (!pluginData) return {}
+  let pData = pluginData
+  if (typeof pData === 'string') {
+    try { pData = JSON.parse(pData) } catch { return {} }
+  }
+  if (typeof pData !== 'object' || pData === null) return {}
+  const record = pData as Record<string, TesseraPluginData>
+  return record['peertube-plugin-tessera'] || record
+}
+
+function validateTesseraWallet (pluginData: unknown): string | null {
+  const data = extractTesseraPluginData(pluginData)
+  const mode = data['tessera-mode'] || 'pay-per-second'
+  if (mode === 'tips') return null
+
+  const wallet = (data['tessera-wallet'] || '').trim()
+  if (!wallet) {
+    return 'Creator wallet address is required for pay-per-second monetization.'
+  }
+  if (!EVM_ADDRESS_RE.test(wallet)) {
+    return 'Creator wallet must be a valid Polygon/EVM address (0x…).'
+  }
+  return null
+}
 
 interface ViewerSession {
   expireTime: number
@@ -26,7 +59,7 @@ const enqueueAction = async (userId: string, action: () => Promise<any>): Promis
 }
 
 export async function register (options: RegisterServerOptions) {
-  const { registerSetting, settingsManager, getRouter, peertubeHelpers } = options
+  const { registerSetting, settingsManager, getRouter, peertubeHelpers, registerHook } = options
 
   // 5.2: Cache base URL to prevent abuse
   let cachedBaseUrl: string | null = null
@@ -181,6 +214,40 @@ export async function register (options: RegisterServerOptions) {
     private: false
   })
 
+  const rejectUploadIfWalletInvalid = ({ req }: { req?: { body?: { pluginData?: unknown } } }) => {
+    const error = validateTesseraWallet(req?.body?.pluginData)
+    if (error) {
+      peertubeHelpers.logger.warn(`[tessera] Upload rejected: ${error}`)
+      return false
+    }
+    return true
+  }
+
+  registerHook({
+    target: 'filter:api.video.upload.accept.result',
+    handler: rejectUploadIfWalletInvalid as () => unknown
+  })
+
+  registerHook({
+    target: 'filter:api.video.pre-import-url.accept.result',
+    handler: rejectUploadIfWalletInvalid as () => unknown
+  })
+
+  registerHook({
+    target: 'filter:api.video.pre-import-torrent.accept.result',
+    handler: rejectUploadIfWalletInvalid as () => unknown
+  })
+
+  registerHook({
+    target: 'filter:api.video.post-import-url.accept.result',
+    handler: rejectUploadIfWalletInvalid as () => unknown
+  })
+
+  registerHook({
+    target: 'filter:api.video.post-import-torrent.accept.result',
+    handler: rejectUploadIfWalletInvalid as () => unknown
+  })
+
   // 2. Set up internal router
   const router = getRouter()
 
@@ -228,6 +295,7 @@ export async function register (options: RegisterServerOptions) {
     let accountName = ''
     let tesseraMode = 'pay-per-second'
     let tesseraRate = ''
+    let tesseraWallet = ''
 
     try {
       const video = await peertubeHelpers.videos.loadByIdOrUUID(videoId) as any
@@ -243,15 +311,10 @@ export async function register (options: RegisterServerOptions) {
           accountName = video.Account.name || video.Account.displayName || ''
         }
         if (video.pluginData) {
-          let pData = video.pluginData;
-          if (typeof pData === 'string') {
-              try { pData = JSON.parse(pData) } catch { /* ignore parse error */ }
-          }
-          if (pData) {
-              const myData = pData['peertube-plugin-tessera'] || pData;
-              if (myData['tessera-mode']) tesseraMode = myData['tessera-mode']
-              if (myData['tessera-rate']) tesseraRate = myData['tessera-rate']
-          }
+          const myData = extractTesseraPluginData(video.pluginData)
+          if (myData['tessera-mode']) tesseraMode = myData['tessera-mode']
+          if (myData['tessera-rate']) tesseraRate = myData['tessera-rate']
+          if (myData['tessera-wallet']) tesseraWallet = myData['tessera-wallet']
         }
       }
     } catch {
@@ -295,6 +358,8 @@ export async function register (options: RegisterServerOptions) {
       duration,
       tesseraMode,
       ratePerSecond,
+      creatorAddress: tesseraWallet || undefined,
+      creatorWallet: tesseraWallet || undefined,
       instanceUrl,
       timestamp: new Date().toISOString()
     }
