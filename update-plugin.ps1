@@ -1,6 +1,10 @@
 # Build and package the plugin
 Write-Host "1. Building the plugin..."
 npm run build
+
+# Automatically append a unique build timestamp to version to bust browser caches
+node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json')); pkg.version = pkg.version + '-build.' + Date.now(); fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));"
+
 npm pack
 
 # Find the latest tarball
