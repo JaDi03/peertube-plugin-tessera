@@ -15,8 +15,8 @@ npm run build
 # Remove old tarballs so we don't accidentally deploy them
 rm -f peertube-plugin-tessera-*.tgz
 
-# Automatically append a unique build timestamp to version to bust browser caches
-node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json')); pkg.version = pkg.version + '-build.' + Date.now(); fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));"
+# Automatically replace the patch version with a unique build timestamp to bust browser caches (must be x.y.z)
+node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json')); const parts = pkg.version.split('.'); parts[2] = Date.now(); pkg.version = parts.join('.'); fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));"
 
 npm pack
 
