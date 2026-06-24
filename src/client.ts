@@ -370,8 +370,8 @@ export async function register (options: RegisterClientOptions) {
       <h4>Tessera Earnings</h4>
       <div class="tessera-wallet">${wallet}</div>
       <div class="tessera-balance" data-tessera-balance>—</div>
-      <button type="button" class="btn-balance" data-action="balance">Revisar Saldo</button>
-      <button type="button" class="btn-withdraw" data-action="withdraw">Reclamar Ganancias</button>
+      <button type="button" class="btn-balance" data-action="balance">Check Balance</button>
+      <button type="button" class="btn-withdraw" data-action="withdraw">Withdraw Earnings</button>
     `
 
     creatorPanelEl.querySelector('[data-action="balance"]')?.addEventListener('click', async (e) => {
