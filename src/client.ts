@@ -316,6 +316,7 @@ export async function register (options: RegisterClientOptions) {
     const completeData = await completeRes.json()
     if (!completeRes.ok) throw new Error(completeData.error || 'Withdraw attestation failed')
 
+    completeData.txRequest.from = connectedWallet
     const txHash = await window.ethereum!.request({
       method: 'eth_sendTransaction',
       params: [completeData.txRequest]
