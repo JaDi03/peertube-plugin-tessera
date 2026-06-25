@@ -156,6 +156,9 @@ export async function register (options: RegisterClientOptions) {
   let creatorPanelEl: HTMLElement | null = null
   let pendingOwnerCheck = false
   let lastPathname = window.location.pathname
+  // True after a new video loads — tells the first ping response to call
+  // arcResetVideoSession (resets per-video counter) instead of arcSetRate (rate-only)
+  let videoJustChanged = false
 
   const isVideoOwner = (): boolean => {
     if (!peertubeHelpers.isLoggedIn()) return false
@@ -487,6 +490,8 @@ export async function register (options: RegisterClientOptions) {
       if (params && params.video) {
         currentVideoId = params.video.uuid || params.video.id?.toString() || null
         currentVideoOwner = params.video.account?.name || params.video.channel?.ownerAccount?.name || null
+        // Signal that the next ping response should reset the per-video cost counter
+        videoJustChanged = true
 
         // Owner is now known — remove the resolving guard so the overlay
         // fades in for regular users (checkPageVisibility keeps it hidden for owners)
@@ -558,8 +563,15 @@ export async function register (options: RegisterClientOptions) {
                   if (data.tesseraMode) {
                       document.body.setAttribute('data-tessera-mode', data.tesseraMode)
                   }
-                  if (data.ratePerSecond && (window as any).arcSetRate) {
-                      (window as any).arcSetRate(data.ratePerSecond)
+                  if (data.ratePerSecond) {
+                      if (videoJustChanged && (window as any).arcResetVideoSession) {
+                          // New video: reset per-video cost counter and update rate
+                          ;(window as any).arcResetVideoSession(data.ratePerSecond)
+                          videoJustChanged = false
+                      } else if ((window as any).arcSetRate) {
+                          // Same video: just keep rate in sync
+                          ;(window as any).arcSetRate(data.ratePerSecond)
+                      }
                   }
               }
           } catch (err) {
