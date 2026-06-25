@@ -138,6 +138,15 @@ export async function register (options: RegisterClientOptions) {
        pointer-events: auto !important;
        user-select: auto !important;
     }
+    /* Hide paywall overlay visually while owner is being resolved.
+       paywall.bundle.js still loads and tracks state but cannot
+       flicker the modal or stall HLS buffering during this window. */
+    body.arc-resolving-owner #arc-paywall-overlay,
+    body.arc-resolving-owner #arc-session-manager {
+       opacity: 0 !important;
+       pointer-events: none !important;
+       transition: opacity 0.15s ease !important;
+    }
   `
   document.head.appendChild(style)
 
@@ -191,11 +200,14 @@ export async function register (options: RegisterClientOptions) {
       // ignore prefetch errors; hook will resolve owner later
     } finally {
       pendingOwnerCheck = false
+      document.body.classList.remove('arc-resolving-owner')
       checkPageVisibility()
       renderCreatorPanel()
     }
   }
-  // Run immediately to prevent modal flicker
+  // Hide overlay immediately before any network call resolves owner.
+  // Removed in prefetchVideoOwner() once we know if user is owner or not.
+  document.body.classList.add('arc-resolving-owner')
   checkPageVisibility()
   void prefetchVideoOwner()
 
@@ -476,7 +488,9 @@ export async function register (options: RegisterClientOptions) {
         currentVideoId = params.video.uuid || params.video.id?.toString() || null
         currentVideoOwner = params.video.account?.name || params.video.channel?.ownerAccount?.name || null
 
-
+        // Owner is now known — remove the resolving guard so the overlay
+        // fades in for regular users (checkPageVisibility keeps it hidden for owners)
+        document.body.classList.remove('arc-resolving-owner')
         checkPageVisibility()
         await loadCreatorWalletForVideo(params.video, currentVideoId)
       }
