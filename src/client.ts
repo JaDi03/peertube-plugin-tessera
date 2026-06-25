@@ -145,6 +145,8 @@ export async function register (options: RegisterClientOptions) {
   let currentVideoOwner: string | null = null
   let currentCreatorWallet: string | null = null
   let creatorPanelEl: HTMLElement | null = null
+  let pendingOwnerCheck = false
+  let lastPathname = window.location.pathname
 
   const isVideoOwner = (): boolean => {
     if (!peertubeHelpers.isLoggedIn()) return false
@@ -155,15 +157,51 @@ export async function register (options: RegisterClientOptions) {
 
   const checkPageVisibility = () => {
       const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/')
-      if (!isWatchPage || isVideoOwner()) {
+      const hideWhileResolvingOwner = isWatchPage
+        && peertubeHelpers.isLoggedIn()
+        && (pendingOwnerCheck || currentVideoOwner === null)
+
+      if (!isWatchPage || isVideoOwner() || hideWhileResolvingOwner) {
          document.body.classList.add('arc-hide-paywall')
          document.body.classList.remove('arc-locked')
       } else {
          document.body.classList.remove('arc-hide-paywall')
       }
+
+  }
+
+  const prefetchVideoOwner = async () => {
+    const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/')
+    if (!isWatchPage || !peertubeHelpers.isLoggedIn()) return
+
+    const match = window.location.pathname.match(/\/(?:watch|w)\/([^/?#]+)/)
+    if (!match?.[1]) return
+
+    pendingOwnerCheck = true
+    checkPageVisibility()
+
+    try {
+      const res = await fetch(`/api/v1/videos/${encodeURIComponent(match[1])}`)
+      if (res.ok) {
+        const data = await res.json()
+        currentVideoOwner = data.account?.name || data.channel?.ownerAccount?.name || null
+        currentVideoId = data.uuid || data.id?.toString() || match[1]
+      }
+    } catch {
+      // ignore prefetch errors; hook will resolve owner later
+    } finally {
+      pendingOwnerCheck = false
+      checkPageVisibility()
+      renderCreatorPanel()
+    }
   }
   // Run immediately to prevent modal flicker
   checkPageVisibility()
+  void prefetchVideoOwner()
+
+  window.addEventListener('popstate', () => {
+    void prefetchVideoOwner()
+  })
 
   // Prevent paywall.js from forcefully pausing the video for the owner
   const observer = new MutationObserver(() => {
@@ -238,7 +276,8 @@ export async function register (options: RegisterClientOptions) {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Balance fetch failed')
       if (balanceEl) {
-        balanceEl.textContent = `$${Number(data.gatewayAvailable || 0).toFixed(4)} USDC`
+        const withdrawable = Number(data.gatewayWithdrawable ?? data.gatewayAvailable ?? 0)
+        balanceEl.textContent = `$${withdrawable.toFixed(4)} USDC`
       }
     } catch (err: any) {
       if (balanceEl) balanceEl.textContent = err?.message || 'Error'
@@ -436,6 +475,7 @@ export async function register (options: RegisterClientOptions) {
         currentVideoId = params.video.uuid || params.video.id?.toString() || null
         currentVideoOwner = params.video.account?.name || params.video.channel?.ownerAccount?.name || null
 
+
         checkPageVisibility()
         await loadCreatorWalletForVideo(params.video, currentVideoId)
       }
@@ -594,6 +634,12 @@ export async function register (options: RegisterClientOptions) {
 
   // Fallback DOM polling to detect video element creation
   setInterval(async () => {
+    if (window.location.pathname !== lastPathname) {
+      lastPathname = window.location.pathname
+      currentVideoOwner = null
+      void prefetchVideoOwner()
+    }
+
     checkPageVisibility()
 
     // Specifically target the main Video.js player to avoid grabbing thumbnail preview videos
