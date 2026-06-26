@@ -56,7 +56,8 @@ export async function register (options: RegisterClientOptions) {
 
   const validateWalletField = async ({ formValues, value }: { formValues?: any, value?: string }) => {
     const mode = getPluginField(formValues, 'tessera-mode') || 'pay-per-second'
-    if (mode === 'tips') return { error: false }
+    // Free mode (with optional tips) does not require a wallet
+    if (mode === 'free') return { error: false }
 
     const wallet = (value || getPluginField(formValues, 'tessera-wallet') || '').trim()
     if (!wallet) {
@@ -77,8 +78,8 @@ export async function register (options: RegisterClientOptions) {
         descriptionHTML: 'Choose how viewers pay for this video.',
         type: 'select' as const,
         options: [
-            { value: 'pay-per-second', label: '⚡ Pay-per-second' },
-            { value: 'tips', label: '💝 Tips (free to watch) - SOON' },
+            { value: 'pay-per-second', label: '⚡ Pay-per-second (private)' },
+            { value: 'free',           label: '🆓 Free (tips welcome)' },
         ],
         default: 'pay-per-second'
       }
@@ -89,11 +90,21 @@ export async function register (options: RegisterClientOptions) {
         name: 'tessera-rate',
         label: 'Rate per second (USDC)',
         type: 'input' as const,
-        default: '0.0001',
+        default: '0.001',
         descriptionHTML: 'Only applies to pay-per-second mode.'
       }
       registerVideoField(rateField, { type: 'upload' })
       registerVideoField(rateField, { type: 'update' })
+
+      const tipAmountField = {
+        name: 'tessera-tip-amount',
+        label: 'Suggested tip amount (USDC)',
+        type: 'input' as const,
+        default: '0.10',
+        descriptionHTML: 'The suggested tip amount shown to viewers on free videos.'
+      }
+      registerVideoField(tipAmountField, { type: 'upload' })
+      registerVideoField(tipAmountField, { type: 'update' })
 
       const walletField = {
         name: 'tessera-wallet',
@@ -570,17 +581,31 @@ export async function register (options: RegisterClientOptions) {
                   }
               } else {
                   const data = await response.json()
-                  if (data.tesseraMode) {
-                      document.body.setAttribute('data-tessera-mode', data.tesseraMode)
-                  }
-                  if (data.ratePerSecond) {
-                      if (videoJustChanged && (window as any).arcResetVideoSession) {
-                          // New video: reset per-video cost counter and update rate
-                          ;(window as any).arcResetVideoSession(data.ratePerSecond)
-                          videoJustChanged = false
-                      } else if ((window as any).arcSetRate) {
-                          // Same video: just keep rate in sync
-                          ;(window as any).arcSetRate(data.ratePerSecond)
+                  if (data.free) {
+                      // Video is free — stop pinging, remove paywall lock
+                      if (pingInterval) {
+                          clearInterval(pingInterval)
+                          pingInterval = undefined
+                      }
+                      document.body.classList.remove('arc-locked')
+                      document.body.setAttribute('data-tessera-mode', 'free')
+                      // Show tip button if paywall.js exposed it
+                      const tipAmount = (data as any).tipAmount
+                      const creatorWallet = (data as any).creatorWallet
+                      if ((window as any).arcShowTipButton) {
+                          ;(window as any).arcShowTipButton(creatorWallet, tipAmount)
+                      }
+                  } else {
+                      if (data.tesseraMode) {
+                          document.body.setAttribute('data-tessera-mode', data.tesseraMode)
+                      }
+                      if (data.ratePerSecond) {
+                          if (videoJustChanged && (window as any).arcResetVideoSession) {
+                              ;(window as any).arcResetVideoSession(data.ratePerSecond)
+                              videoJustChanged = false
+                          } else if ((window as any).arcSetRate) {
+                              ;(window as any).arcSetRate(data.ratePerSecond)
+                          }
                       }
                   }
               }

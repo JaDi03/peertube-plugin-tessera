@@ -8,6 +8,7 @@ interface TesseraPluginData {
   'tessera-mode'?: string
   'tessera-rate'?: string
   'tessera-wallet'?: string
+  'tessera-tip-amount'?: string
 }
 
 function extractTesseraPluginData (pluginData: unknown): TesseraPluginData {
@@ -75,7 +76,8 @@ async function loadTesseraVideoData (
 function validateTesseraWallet (pluginData: unknown): string | null {
   const data = extractTesseraPluginData(pluginData)
   const mode = data['tessera-mode'] || 'pay-per-second'
-  if (mode === 'tips') return null
+  // Free mode (with optional tips) does not require a wallet or rate
+  if (mode === 'free') return null
 
   const wallet = (data['tessera-wallet'] || '').trim()
   if (!wallet) {
@@ -256,14 +258,6 @@ export async function register (options: RegisterServerOptions) {
     private: false
   })
 
-  await registerSetting({
-    name: 'base-rate-per-second',
-    label: 'Base Rate Per Second',
-    type: 'input',
-    descriptionHTML: 'Default Tessera payment rate per second for videos without explicit pricing (e.g. 0.0001)',
-    default: '0.0001',
-    private: false
-  })
 
   const rejectUploadIfWalletInvalid = (result: any, params?: any) => {
     // Some hooks might pass req inside params
@@ -465,8 +459,7 @@ export async function register (options: RegisterServerOptions) {
 
     // Video metadata loading was moved above auth check
 
-    const globalRate = (await settingsManager.getSetting('base-rate-per-second')) as string || '0.0001'
-    const ratePerSecond = tesseraRate || globalRate
+    const ratePerSecond = tesseraRate || '0.001'
 
     const payloadData = {
       userId,
@@ -549,7 +542,13 @@ export async function register (options: RegisterServerOptions) {
     })
 
     if (!res.headersSent) {
-      res.json({ success: true, tesseraMode, ratePerSecond })
+      // If the video is free, tell the client to stop pinging and show the tip button
+      if (tesseraMode === 'free') {
+        const tesseraTipAmount = (await loadTesseraVideoData(storageManager, videoId as any, undefined))['tessera-tip-amount'] || '0.10'
+        res.json({ success: true, tesseraMode, free: true, tipAmount: tesseraTipAmount, creatorWallet: tesseraWallet || null })
+      } else {
+        res.json({ success: true, tesseraMode, ratePerSecond })
+      }
     }
   })
 }
