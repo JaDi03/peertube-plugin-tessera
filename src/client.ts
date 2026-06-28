@@ -816,10 +816,24 @@ export async function register (options: RegisterClientOptions) {
   let abortController: AbortController | null = null
   let pendingPing: Promise<any> | null = null
 
-  const sendPing = async (action: 'start' | 'stop' | 'ping'): Promise<void> => {
+  const sendPing = async (action: 'start' | 'stop' | 'ping', retryCount = 0): Promise<void> => {
       if (action !== 'stop' && !isPaywallUnlocked()) return
 
       const videoId = getCurrentVideoId()
+      if (!videoId) {
+          if (retryCount < 20) {
+              console.warn('[tessera] Delaying ping: videoId is not yet loaded. Retrying in 500ms...')
+              setTimeout(() => {
+                  sendPing(action, retryCount + 1).catch(err => {
+                      console.error('[tessera] Retried ping failed:', err)
+                  })
+              }, 500)
+          } else {
+              console.error('[tessera] Ping aborted: videoId failed to load after multiple attempts.')
+          }
+          return
+      }
+
       const videoUrl = window.location.href
       const sessionId = getPaywallUserId()
 
