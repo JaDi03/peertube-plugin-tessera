@@ -394,6 +394,55 @@ export async function register (options: RegisterServerOptions) {
     res.json({ wallet: wallet || null });
   })
 
+  // Proxy endpoint to fetch the platform admin's balance from the sidecar
+  router.get('/admin/balance', async (req: any, res: any) => {
+    try {
+      const user = await peertubeHelpers.user.getAuthUser(res)
+      if (!user || user.role !== 0) {
+        return res.status(401).json({ error: 'Unauthorized: Admin only' })
+      }
+
+      const baseUrl = await getBaseUrl()
+      if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
+
+      const secret = await settingsManager.getSetting('webhook-secret') as string
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/seller/balance`, {
+        headers: {
+          'Authorization': `Bearer ${secret}`
+        }
+      })
+      const data = await response.json()
+      return res.status(response.status).json(data)
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message })
+    }
+  })
+
+  // Proxy endpoint to trigger platform admin withdrawal on the sidecar
+  router.post('/admin/withdraw', async (req: any, res: any) => {
+    try {
+      const user = await peertubeHelpers.user.getAuthUser(res)
+      if (!user || user.role !== 0) {
+        return res.status(401).json({ error: 'Unauthorized: Admin only' })
+      }
+
+      const baseUrl = await getBaseUrl()
+      if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
+
+      const secret = await settingsManager.getSetting('webhook-secret') as string
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/seller/withdraw`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${secret}`
+        }
+      })
+      const data = await response.json()
+      return res.status(response.status).json(data)
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message })
+    }
+  })
+
   // Ping route handler
   router.post('/ping', async (req: any, res: any) => {
     // 5.3 Runtime type validation

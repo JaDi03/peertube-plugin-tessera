@@ -168,6 +168,7 @@ export async function register (options: RegisterClientOptions) {
   // Must be declared here (not near renderAdminPanel) to avoid Temporal Dead Zone:
   // renderAdminPanel is a hoisted function declaration and is called early in register().
   let adminPanelEl: HTMLElement | null = null
+  let isAdminPanelRendering = false
   let pendingOwnerCheck = false
   let lastPathname = window.location.pathname
   // True after a new video loads — tells the first ping response to call
@@ -215,6 +216,7 @@ export async function register (options: RegisterClientOptions) {
         const data = await res.json()
         currentVideoOwner = data.account?.name || data.channel?.ownerAccount?.name || null
         currentVideoId = data.uuid || data.id?.toString() || match[1]
+        currentCreatorWallet = readWalletFromVideo(data)
       }
     } catch {
       // ignore prefetch errors; hook will resolve owner later
@@ -306,7 +308,7 @@ export async function register (options: RegisterClientOptions) {
     const balanceEl = creatorPanelEl.querySelector('[data-tessera-balance]') as HTMLElement | null
     if (balanceEl) balanceEl.textContent = 'Loading…'
     try {
-      const res = await fetch(`${baseUrl}/api/core/creator/balance?address=${encodeURIComponent(wallet)}`)
+      const res = await fetch(`${baseUrl}/api/connectors/peertube/creator/balance?address=${encodeURIComponent(wallet)}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Balance fetch failed')
       if (balanceEl) {
@@ -321,7 +323,7 @@ export async function register (options: RegisterClientOptions) {
   const withdrawCreatorEarnings = async (wallet: string) => {
     const connectedWallet = await connectCreatorWallet(wallet)
 
-    const prepareRes = await fetch(`${baseUrl}/api/core/creator/prepare-withdraw`, {
+    const prepareRes = await fetch(`${baseUrl}/api/connectors/peertube/creator/prepare-withdraw`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: connectedWallet })
@@ -338,7 +340,7 @@ export async function register (options: RegisterClientOptions) {
       params: [connectedWallet, JSON.stringify(prepareData.typedData)]
     }) as string
 
-    const completeRes = await fetch(`${baseUrl}/api/core/creator/complete-withdraw`, {
+    const completeRes = await fetch(`${baseUrl}/api/connectors/peertube/creator/complete-withdraw`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -358,6 +360,46 @@ export async function register (options: RegisterClientOptions) {
 
     peertubeHelpers.notifier.success(`Withdrawal submitted! Tx: ${txHash.slice(0, 10)}…`)
     await updateCreatorPanelBalance(wallet)
+  }
+
+  const makeElementDraggable = (el: HTMLElement) => {
+    let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+    const header = el.querySelector('h4') || el;
+    header.style.cursor = 'move';
+    header.onmousedown = (e: MouseEvent) => {
+      e = e || window.event;
+      if ((e.target as HTMLElement).tagName === 'BUTTON') return;
+      e.preventDefault();
+      
+      const rect = el.getBoundingClientRect();
+      el.style.top = rect.top + 'px';
+      el.style.left = rect.left + 'px';
+      el.style.bottom = 'auto';
+      el.style.right = 'auto';
+      
+      pos3 = e.clientX;
+      pos4 = e.clientY;
+      document.onmouseup = () => {
+        document.onmouseup = null;
+        document.onmousemove = null;
+      };
+      document.onmousemove = (moveEvent: MouseEvent) => {
+        moveEvent = moveEvent || window.event;
+        moveEvent.preventDefault();
+        pos1 = pos3 - moveEvent.clientX;
+        pos2 = pos4 - moveEvent.clientY;
+        pos3 = moveEvent.clientX;
+        pos4 = moveEvent.clientY;
+        
+        const newTop = el.offsetTop - pos2;
+        const newLeft = el.offsetLeft - pos1;
+        const maxLeft = window.innerWidth - el.offsetWidth;
+        const maxTop = window.innerHeight - el.offsetHeight;
+        
+        el.style.top = Math.max(0, Math.min(newTop, maxTop)) + 'px';
+        el.style.left = Math.max(0, Math.min(newLeft, maxLeft)) + 'px';
+      };
+    };
   }
 
   const renderCreatorPanel = () => {
@@ -473,6 +515,7 @@ export async function register (options: RegisterClientOptions) {
     })
 
     document.body.appendChild(creatorPanelEl)
+    makeElementDraggable(creatorPanelEl)
     void updateCreatorPanelBalance(wallet)
   }
 
@@ -482,7 +525,13 @@ export async function register (options: RegisterClientOptions) {
     const balanceEl = adminPanelEl?.querySelector('[data-tessera-balance]')
     if (balanceEl) balanceEl.textContent = 'Loading...'
     try {
-      const res = await fetch(`${baseUrl}/api/core/seller/balance`)
+      const pluginRoute = peertubeHelpers.getBaseRouterRoute()
+      const authHeader = peertubeHelpers.getAuthHeader()
+      const res = await fetch(`${pluginRoute}/admin/balance`, {
+        headers: {
+          ...authHeader
+        }
+      })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Balance fetch failed')
       if (balanceEl) {
@@ -495,8 +544,9 @@ export async function register (options: RegisterClientOptions) {
   }
 
   async function renderAdminPanel() {
-    // Only show on the plugin settings page
-    if (!window.location.pathname.includes('/admin/plugins')) {
+    // Only show on the specific tessera plugin settings page
+    const isAdminPluginsPage = window.location.pathname.includes('plugins/show/peertube-plugin-tessera')
+    if (!isAdminPluginsPage) {
       if (adminPanelEl) {
         adminPanelEl.remove()
         adminPanelEl = null
@@ -509,19 +559,29 @@ export async function register (options: RegisterClientOptions) {
     if (!user || user.role?.id !== 0) return
 
     // Ensure we don't duplicate
-    if (adminPanelEl) return
-
+    if (adminPanelEl || isAdminPanelRendering) return
+    isAdminPanelRendering = true
+ 
     let adminWallet: string
     try {
       const pluginRoute = peertubeHelpers.getBaseRouterRoute()
-      const res = await fetch(`${pluginRoute}/admin/wallet`)
+      const authHeader = peertubeHelpers.getAuthHeader()
+      const res = await fetch(`${pluginRoute}/admin/wallet`, {
+        headers: { ...authHeader }
+      })
       const data = await res.json()
       adminWallet = data.wallet
     } catch {
+      isAdminPanelRendering = false
       return
     }
-
-    if (!adminWallet) return
+ 
+    if (!adminWallet) {
+      isAdminPanelRendering = false
+      return
+    }
+ 
+    isAdminPanelRendering = false
 
     adminPanelEl = document.createElement('div')
     adminPanelEl.id = 'tessera-admin-panel'
@@ -605,7 +665,14 @@ export async function register (options: RegisterClientOptions) {
       btn.disabled = true
       try {
         peertubeHelpers.notifier.info('Initiating withdrawal...')
-        const res = await fetch(`${baseUrl}/api/core/seller/withdraw`, { method: 'POST' })
+        const pluginRoute = peertubeHelpers.getBaseRouterRoute()
+        const authHeader = peertubeHelpers.getAuthHeader()
+        const res = await fetch(`${pluginRoute}/admin/withdraw`, {
+          method: 'POST',
+          headers: {
+            ...authHeader
+          }
+        })
         const data = await res.json()
         if (!res.ok) throw new Error(data.error || 'Withdraw failed')
         if (data.status === 'no_funds') {
@@ -849,6 +916,11 @@ export async function register (options: RegisterClientOptions) {
       // from a free video to a pay-per-second video)
       const tipContainer = document.getElementById('arc-tip-btn-container')
       if (tipContainer) tipContainer.remove()
+      // Remove creator panel
+      if (creatorPanelEl) {
+          creatorPanelEl.remove()
+          creatorPanelEl = null
+      }
   }
 
   const attachVideoListeners = (video: HTMLVideoElement) => {
@@ -903,10 +975,15 @@ export async function register (options: RegisterClientOptions) {
     if (window.location.pathname !== lastPathname) {
       lastPathname = window.location.pathname
       currentVideoOwner = null
+      currentVideoId = null
+      currentCreatorWallet = null
       void prefetchVideoOwner()
+      renderCreatorPanel()
+      void renderAdminPanel()
     }
 
     checkPageVisibility()
+    void renderAdminPanel()
 
     // Specifically target the main Video.js player to avoid grabbing thumbnail preview videos
     const video = document.querySelector('.vjs-tech, .video-js video, video-player video') as HTMLVideoElement | null
