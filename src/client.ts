@@ -840,7 +840,6 @@ export async function register (options: RegisterClientOptions) {
           // Stop pings are best-effort: if we have no videoId, just abort silently.
           // Only start/ping actions should retry since billing depends on them.
           if (action === 'stop') return
-
           if (retryCount < 20) {
               console.warn('[tessera] Delaying ping: videoId is not yet loaded. Retrying in 500ms...')
               setTimeout(() => {
