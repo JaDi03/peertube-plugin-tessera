@@ -832,11 +832,14 @@ export async function register (options: RegisterClientOptions) {
   let abortController: AbortController | null = null
   let pendingPing: Promise<any> | null = null
 
-  const sendPing = async (action: 'start' | 'stop' | 'ping', retryCount = 0): Promise<void> => {
+  const sendPing = async (action: 'start' | 'stop' | 'ping', retryCount = 0, overrideVideoId?: string): Promise<void> => {
       if (action !== 'stop' && !isPaywallUnlocked()) return
 
-      const videoId = getCurrentVideoId()
+      const videoId = overrideVideoId || getCurrentVideoId()
       if (!videoId) {
+          // Stop pings are best-effort: if we have no videoId, just abort silently.
+          // Only start/ping actions should retry since billing depends on them.
+          if (action === 'stop') return
           if (retryCount < 20) {
               console.warn('[tessera] Delaying ping: videoId is not yet loaded. Retrying in 500ms...')
               setTimeout(() => {
@@ -935,12 +938,17 @@ export async function register (options: RegisterClientOptions) {
           clearInterval(pingInterval)
           pingInterval = undefined
       }
-      await sendPing('stop')
+      // Capture the videoId of the video we are LEAVING before we clear any state.
+      // This prevents the stop ping from using the new video's ID or failing to find one.
+      const leavingVideoId = currentVideoId
+      await sendPing('stop', 0, leavingVideoId ?? undefined)
       if (abortController) {
           abortController.abort()
           abortController = null
       }
       currentVideo = null
+      currentVideoId = null
+      paywallInitialized = false // Allow next video to reinitialize paywall correctly
       isCleaningUp = false
       // Remove tip button when leaving a video (covers: back to menu, or switching
       // from a free video to a pay-per-second video)
