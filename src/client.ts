@@ -727,8 +727,17 @@ export async function register (options: RegisterClientOptions) {
 
   // Initializes the paywall engine for the current video mode.
   // Guards against double-initialization across hook re-fires.
-  const initPaywallEngine = (mode: string, wallet: string | null, tipAmount?: string | null) => {
+  const initPaywallEngine = (mode: string | null, wallet: string | null, tipAmount?: string | null) => {
     if (paywallInitialized) return
+
+    // If the video has no wallet address configured and is not explicitly a free video,
+    // it is a standard unmonetized video. We must bypass the paywall entirely.
+    if (!wallet && mode !== 'free') {
+      console.log('[tessera] Video is unmonetized (no wallet address set). Bypassing paywall.')
+      document.body.classList.remove('arc-locked')
+      return
+    }
+
     paywallInitialized = true
 
     const arcCashier = (window as any).ArcCashier
@@ -942,6 +951,11 @@ export async function register (options: RegisterClientOptions) {
           creatorPanelEl.remove()
           creatorPanelEl = null
       }
+      // Remove lingering paywall overlay or session manager widgets from previous videos
+      const overlay = document.getElementById('arc-paywall-overlay')
+      if (overlay) overlay.remove()
+      const sessionManager = document.getElementById('arc-session-manager')
+      if (sessionManager) sessionManager.remove()
   }
 
   const attachVideoListeners = (video: HTMLVideoElement) => {
