@@ -413,7 +413,8 @@ export async function register (options: RegisterServerOptions) {
   router.get('/admin/balance', async (req: any, res: any) => {
     try {
       const user = await peertubeHelpers.user.getAuthUser(res)
-      if (!user || user.role !== 0) {
+      const roleId = typeof user?.role === 'object' ? (user.role as any).id : user?.role
+      if (!user || roleId !== 0) {
         return res.status(401).json({ error: 'Unauthorized: Admin only' })
       }
 
@@ -437,7 +438,8 @@ export async function register (options: RegisterServerOptions) {
   router.post('/admin/withdraw', async (req: any, res: any) => {
     try {
       const user = await peertubeHelpers.user.getAuthUser(res)
-      if (!user || user.role !== 0) {
+      const roleId = typeof user?.role === 'object' ? (user.role as any).id : user?.role
+      if (!user || roleId !== 0) {
         return res.status(401).json({ error: 'Unauthorized: Admin only' })
       }
 
