@@ -320,9 +320,11 @@ export async function register (options: RegisterClientOptions) {
     }
   }
 
-  const withdrawCreatorEarnings = async (wallet: string) => {
+  const withdrawCreatorEarnings = async (wallet: string, txDiv?: HTMLElement | null) => {
+    if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Preparing withdrawal intent...</span>'
     const connectedWallet = await connectCreatorWallet(wallet)
 
+    if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Fetching withdraw intent from Tessera...</span>'
     const prepareRes = await fetch(`${baseUrl}/api/connectors/peertube/creator/prepare-withdraw`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -332,14 +334,17 @@ export async function register (options: RegisterClientOptions) {
     if (!prepareRes.ok) throw new Error(prepareData.error || 'Could not prepare withdrawal')
     if (prepareData.status === 'no_funds') {
       peertubeHelpers.notifier.info('No withdrawable balance in Gateway yet.')
+      if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">No withdrawable balance.</span>'
       return
     }
 
+    if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Sign the BurnIntent popup in MetaMask...</span>'
     const signature = await window.ethereum!.request({
       method: 'eth_signTypedData_v4',
       params: [connectedWallet, JSON.stringify(prepareData.typedData)]
     }) as string
 
+    if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Submitting signature to Tessera...</span>'
     const completeRes = await fetch(`${baseUrl}/api/connectors/peertube/creator/complete-withdraw`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -353,11 +358,19 @@ export async function register (options: RegisterClientOptions) {
     if (!completeRes.ok) throw new Error(completeData.error || 'Withdraw attestation failed')
 
     completeData.txRequest.from = connectedWallet
+    if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Confirm the mint transaction in MetaMask...</span>'
     const txHash = await window.ethereum!.request({
       method: 'eth_sendTransaction',
       params: [completeData.txRequest]
     }) as string
 
+    if (txDiv) {
+      txDiv.innerHTML = `
+        <a href="https://testnet.arcscan.app/tx/${txHash}" target="_blank" style="color: #38a169; text-decoration: underline; font-weight: 600; display: block; margin-top: 4px;">
+          🧾 View Transaction on Arcscan
+        </a>
+      `
+    }
     peertubeHelpers.notifier.success(`Withdrawal submitted! Tx: ${txHash.slice(0, 10)}…`)
     await updateCreatorPanelBalance(wallet)
   }
@@ -483,11 +496,12 @@ export async function register (options: RegisterClientOptions) {
           cursor: not-allowed;
         }
       </style>
-      <h4>Tessera Earnings</h4>
+      <h4>Creator Earnings</h4>
       <div class="tessera-wallet">${wallet}</div>
       <div class="tessera-balance" data-tessera-balance>—</div>
       <button type="button" class="btn-balance" data-action="balance">Check Balance</button>
       <button type="button" class="btn-withdraw" data-action="withdraw">Withdraw Earnings</button>
+      <div class="tessera-tx" data-tessera-tx style="font-size: 11px; text-align: center; margin-top: 8px; word-break: break-all;"></div>
     `
 
     creatorPanelEl.querySelector('[data-action="balance"]')?.addEventListener('click', async (e) => {
@@ -505,9 +519,12 @@ export async function register (options: RegisterClientOptions) {
     creatorPanelEl.querySelector('[data-action="withdraw"]')?.addEventListener('click', async (e) => {
       const btn = e.currentTarget as HTMLButtonElement
       btn.disabled = true
+      const txDiv = creatorPanelEl?.querySelector('[data-tessera-tx]') as HTMLElement | null
+      if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Initiating withdrawal...</span>'
       try {
-        await withdrawCreatorEarnings(wallet)
+        await withdrawCreatorEarnings(wallet, txDiv)
       } catch (err: any) {
+        if (txDiv) txDiv.innerHTML = `<span style="color: #e53e3e;">Error: ${err?.message || 'Withdraw failed'}</span>`
         peertubeHelpers.notifier.error(err?.message || 'Withdraw failed')
       } finally {
         btn.disabled = false
@@ -646,6 +663,7 @@ export async function register (options: RegisterClientOptions) {
       <div class="tessera-balance" data-tessera-balance>—</div>
       <button type="button" class="btn-balance" data-action="balance">Check Balance</button>
       <button type="button" class="btn-withdraw" data-action="withdraw">Withdraw to Wallet</button>
+      <div class="tessera-tx" data-tessera-tx style="font-size: 11px; text-align: center; margin-top: 8px; word-break: break-all;"></div>
     `
 
     adminPanelEl.querySelector('[data-action="balance"]')?.addEventListener('click', async (e) => {
@@ -663,6 +681,8 @@ export async function register (options: RegisterClientOptions) {
     adminPanelEl.querySelector('[data-action="withdraw"]')?.addEventListener('click', async (e) => {
       const btn = e.currentTarget as HTMLButtonElement
       btn.disabled = true
+      const txDiv = adminPanelEl?.querySelector('[data-tessera-tx]') as HTMLElement | null
+      if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Initiating withdrawal...</span>'
       try {
         peertubeHelpers.notifier.info('Initiating withdrawal...')
         const pluginRoute = peertubeHelpers.getBaseRouterRoute()
@@ -677,11 +697,20 @@ export async function register (options: RegisterClientOptions) {
         if (!res.ok) throw new Error(data.error || 'Withdraw failed')
         if (data.status === 'no_funds') {
           peertubeHelpers.notifier.info('No withdrawable balance in Gateway.')
+          if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">No withdrawable balance.</span>'
         } else {
+          if (txDiv) {
+            txDiv.innerHTML = `
+              <a href="https://testnet.arcscan.app/tx/${data.txHash}" target="_blank" style="color: #38a169; text-decoration: underline; font-weight: 600; display: block; margin-top: 4px;">
+                🧾 View Transaction on Arcscan
+              </a>
+            `
+          }
           peertubeHelpers.notifier.success(`Withdrawn ${data.withdrawnAmount} USDC! Tx: ${data.txHash.slice(0, 10)}…`)
         }
         await updateAdminPanelBalance()
       } catch (err: any) {
+        if (txDiv) txDiv.innerHTML = `<span style="color: #e53e3e;">Error: ${err?.message || 'Withdraw failed'}</span>`
         peertubeHelpers.notifier.error(err?.message || 'Withdraw failed')
       } finally {
         btn.disabled = false
