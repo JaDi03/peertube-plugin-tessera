@@ -409,7 +409,7 @@ export async function register (options: RegisterServerOptions) {
     res.json({ wallet: wallet || null });
   })
 
-  // Proxy endpoint to fetch the platform admin's balance from the sidecar
+  // Relay endpoint to forward the platform admin's balance queries to the sidecar
   router.get('/admin/balance', async (req: any, res: any) => {
     try {
       const user = await peertubeHelpers.user.getAuthUser(res)
@@ -434,7 +434,7 @@ export async function register (options: RegisterServerOptions) {
     }
   })
 
-  // Proxy endpoint to trigger platform admin withdrawal on the sidecar
+  // Relay endpoint to forward platform admin withdrawal requests to the sidecar
   router.post('/admin/withdraw', async (req: any, res: any) => {
     try {
       const user = await peertubeHelpers.user.getAuthUser(res)
