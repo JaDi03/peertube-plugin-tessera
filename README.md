@@ -41,6 +41,7 @@ To use this PeerTube plugin, you must have an instance of Tessera running (see t
 ## Table of Contents
 - [Key Features](#key-features)
 - [How It Works](#how-it-works)
+- [Proof of Concept / Demo](#proof-of-concept--demo)
 - [Quick Start](#quick-start)
 - [Project Structure](#project-structure)
 - [Technical Safety Limits](#technical-safety-limits)
@@ -90,6 +91,18 @@ sequenceDiagram
 2.  **Webhook Trigger:** On video play, the plugin server validates the metadata and issues a signed webhook to Tessera.
 3.  **Active Keep-Alive:** Pings sent from the client every 15 seconds update the memory cache.
 4.  **Session Terminate:** Pausing, ending, or closing the tab immediately triggers a stop event, settling the payment on-chain.
+
+---
+
+## Proof of Concept / Demo
+
+Here is how the PeerTube player interface looks during active session monetization and tipping:
+
+### Pay-Per-Second Monetization
+![Pay-Per-Second Screen](media/pay-per-second.png)
+
+### Tipping Overlay
+![Tipping Screen](media/tips.png)
 
 ---
 
