@@ -371,6 +371,24 @@ export async function register (options: RegisterServerOptions) {
   // 2. Set up internal router
   const router = getRouter()
 
+  const loadVideoWithFallback = async (idOrUuid: string): Promise<any> => {
+    try {
+      return await peertubeHelpers.videos.loadByIdOrUUID(idOrUuid)
+    } catch (err) {
+      try {
+        const localUrl = peertubeHelpers.config.getWebserverUrl()
+        const apiRes = await fetch(`${localUrl}/api/v1/videos/${encodeURIComponent(idOrUuid)}`)
+        if (apiRes.ok) {
+          const video = await apiRes.json()
+          return video
+        }
+      } catch (fallbackErr) {
+        peertubeHelpers.logger.warn(`[tessera] Local API fallback failed for ${idOrUuid}: ${fallbackErr}`)
+      }
+      throw err
+    }
+  }
+
   // Endpoint for the client script to retrieve the base URL
   router.get('/base-url', async (req: any, res: any) => {
     let baseUrl = await getBaseUrl()
@@ -387,7 +405,7 @@ export async function register (options: RegisterServerOptions) {
   router.get('/video/:id/tessera-data', async (req: any, res: any) => {
     const videoId = req.params.id
     try {
-      const video = await peertubeHelpers.videos.loadByIdOrUUID(videoId) as { id?: number; pluginData?: unknown }
+      const video = await loadVideoWithFallback(videoId) as { id?: number; pluginData?: unknown }
       if (!video?.id) return res.status(404).json({ error: 'Video not found' })
 
       const data = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
@@ -495,7 +513,7 @@ export async function register (options: RegisterServerOptions) {
     let tesseraWallet = ''
 
     try {
-      const video = await peertubeHelpers.videos.loadByIdOrUUID(videoId) as any
+      const video = await loadVideoWithFallback(videoId) as any
       if (video) {
         if (video.VideoChannel) {
           channelId = video.VideoChannel.name || video.VideoChannel.id.toString()
