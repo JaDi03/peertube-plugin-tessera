@@ -3,7 +3,7 @@
 <div align="center">
   <!-- Row 1: Status Badges -->
   <img src="https://img.shields.io/badge/Build-Passing-brightgreen?style=for-the-badge" alt="Build Status">
-  <img src="https://img.shields.io/badge/Version-1.0.14-blue?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-1.1.2-blue?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-Apache_2.0-yellow?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/Node->=18-339933?style=for-the-badge" alt="Node Version">
   <br>
@@ -169,7 +169,7 @@ To ensure high availability and prevent abuse in decentralized environments, the
 *   **Rate Limiting:** To prevent abuse on the plugin's internal ping router, the backend enforces a limit of 1 ping every 2 seconds per session.
 *   **Ghost Session Collection:** The internal garbage collector awaits confirmation from the Tessera webhook before removing a session from memory. If the connection fails, it defers removal to retry on the next cycle.
 *   **Transparent Limitations:**
-    *   Unauthenticated users will hit a `401 Unauthorized` block. This locks them out of paid content natively.
+    *   Viewers do **not** need to be logged into the PeerTube instance to watch premium videos or tip. The payment session is managed entirely by the Tessera paywall client using its own identity system.
     *   If the Tessera sidecar suffers extended downtime, PeerTube's memory buffer may fill up and evict sessions without final billing confirmation. High uptime on the Tessera sidecar is recommended.
 
 ---
