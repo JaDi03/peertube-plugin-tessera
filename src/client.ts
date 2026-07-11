@@ -909,6 +909,9 @@ export async function register (options: RegisterClientOptions) {
                   } else {
                       console.warn(`[tessera] Ping failed with status: ${response.status}`)
                   }
+                  if (action === 'start') {
+                      hasStarted = false
+                  }
               } else {
                   const data = await response.json()
                   if (data.free) {
@@ -937,6 +940,9 @@ export async function register (options: RegisterClientOptions) {
               }
           } catch (err) {
               console.error('[tessera] Failed to send ping:', err)
+              if (action === 'start') {
+                  hasStarted = false
+              }
           } finally {
               pendingPing = null
           }
