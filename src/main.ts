@@ -91,6 +91,16 @@ function validateTesseraWallet (pluginData: unknown): string | null {
   if (!EVM_ADDRESS_RE.test(wallet)) {
     return 'Creator wallet must be a valid Arc Network address (0x…).'
   }
+
+  // Robust validation of rate per second
+  const rateStr = data['tessera-rate']
+  if (rateStr === undefined || rateStr === null || rateStr === '') {
+    return 'Rate per second is required for pay-per-second monetization.'
+  }
+  const rate = Number(rateStr)
+  if (isNaN(rate) || rate < 0.000001 || rate > 0.01) {
+    return 'Rate per second must be a number between 0.000001 and 0.01 USDC.'
+  }
   return null
 }
 
@@ -558,7 +568,7 @@ export async function register (options: RegisterServerOptions) {
 
     // Video metadata loading was moved above auth check
 
-    const ratePerSecond = tesseraRate || '0.001'
+    const ratePerSecond = tesseraMode === 'free' ? 0 : Number(tesseraRate || '0.0001')
 
     const payloadData = {
       userId,
