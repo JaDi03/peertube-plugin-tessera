@@ -789,6 +789,8 @@ export async function register (options: RegisterClientOptions) {
   registerHook({
     target: 'action:video-watch.video.loaded',
     handler: async (params: any) => {
+      await cleanupVideoState()
+
       if (params && params.video) {
         // Reset initialization state for each new video
         paywallInitialized = false
