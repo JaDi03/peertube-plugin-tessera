@@ -549,7 +549,6 @@ export async function register (options: RegisterServerOptions) {
     }
 
     // No PeerTube authentication required. Identity is provided by the paywall's sessionId.
-
     let channelId = ''
     let channelName = ''
     let views = 0
@@ -559,10 +558,20 @@ export async function register (options: RegisterServerOptions) {
     let tesseraMode = 'pay-per-second'
     let tesseraRate = ''
     let tesseraWallet = ''
+    let isLocal = true
+    let originInstanceUrl = peertubeHelpers.config.getWebserverUrl()
 
     try {
       const video = await loadVideoWithFallback(videoId) as any
       if (video) {
+        isLocal = video.isLocal !== false
+        if (!isLocal && video.url) {
+          try {
+            originInstanceUrl = new URL(video.url).origin
+          } catch {
+            // Keep local fallback
+          }
+        }
         if (video.VideoChannel) {
           channelId = video.VideoChannel.name || video.VideoChannel.id.toString()
           channelName = video.VideoChannel.displayName || channelId
@@ -607,6 +616,9 @@ export async function register (options: RegisterServerOptions) {
     // Video metadata loading was moved above auth check
 
     const ratePerSecond = tesseraMode === 'free' ? 0 : Number(tesseraRate || '0.0001')
+    const adminWallet = await settingsManager.getSetting('admin-wallet-address') as string
+    const displayFeeStr = await settingsManager.getSetting('tessera-display-fee') as string || '0.10'
+    const originFeeStr = await settingsManager.getSetting('tessera-origin-fee') as string || '0.10'
 
     const payloadData = {
       userId,
@@ -623,7 +635,11 @@ export async function register (options: RegisterServerOptions) {
       creatorAddress: tesseraWallet || undefined,
       creatorWallet: tesseraWallet || undefined,
       instanceUrl,
-      timestamp: new Date().toISOString()
+      adminWallet: adminWallet || undefined,
+      displayFee: parseFloat(displayFeeStr),
+      originFee: parseFloat(originFeeStr),
+      originInstanceUrl,
+      isLocal,
     }
 
     await enqueueAction(userId, async () => {
