@@ -6,7 +6,8 @@ set -e
 
 echo "🔄 Pulling latest version from GitHub..."
 git fetch origin
-git reset --hard origin/main
+BRANCH=${1:-main}
+git reset --hard "origin/$BRANCH"
 
 
 echo "📦 Building the Tessera Plugin..."

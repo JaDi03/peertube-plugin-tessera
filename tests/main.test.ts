@@ -28,12 +28,14 @@ describe('PeerTube Plugin Tessera - Server', () => {
     await register(options)
     
     // Verify that the webhook settings were registered
-    expect(options.registerSetting).toHaveBeenCalledTimes(5)
+    expect(options.registerSetting).toHaveBeenCalledTimes(7)
     expect(options.registerSetting).toHaveBeenCalledWith(expect.objectContaining({ name: 'tessera-base-url' }))
     expect(options.registerSetting).toHaveBeenCalledWith(expect.objectContaining({ name: 'webhook-url' }))
     expect(options.registerSetting).toHaveBeenCalledWith(expect.objectContaining({ name: 'webhook-secret' }))
     expect(options.registerSetting).toHaveBeenCalledWith(expect.objectContaining({ name: 'max-active-viewers' }))
     expect(options.registerSetting).toHaveBeenCalledWith(expect.objectContaining({ name: 'admin-wallet-address' }))
+    expect(options.registerSetting).toHaveBeenCalledWith(expect.objectContaining({ name: 'tessera-display-fee' }))
+    expect(options.registerSetting).toHaveBeenCalledWith(expect.objectContaining({ name: 'tessera-origin-fee' }))
     
     // Verify the router was created
     expect(options.getRouter).toHaveBeenCalled()
@@ -43,6 +45,11 @@ describe('PeerTube Plugin Tessera - Server', () => {
     expect(mockRouter.get).toHaveBeenCalledWith('/base-url', expect.any(Function))
     expect(mockRouter.get).toHaveBeenCalledWith('/video/:id/tessera-data', expect.any(Function))
     expect(mockRouter.get).toHaveBeenCalledWith('/admin/wallet', expect.any(Function))
+    expect(mockRouter.get).toHaveBeenCalledWith('/admin/balance', expect.any(Function))
+    expect(mockRouter.post).toHaveBeenCalledWith('/admin/prepare-withdraw', expect.any(Function))
+    expect(mockRouter.post).toHaveBeenCalledWith('/admin/complete-withdraw', expect.any(Function))
+    expect(mockRouter.get).toHaveBeenCalledWith('/admin/stats', expect.any(Function))
+    expect(mockRouter.get).toHaveBeenCalledWith('/creator/stats', expect.any(Function))
     expect(mockRouter.post).toHaveBeenCalledWith('/ping', expect.any(Function))
   })
 })

@@ -488,7 +488,7 @@ export async function register (options: RegisterServerOptions) {
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
       const secret = await settingsManager.getSetting('webhook-secret') as string
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/seller/balance`, {
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/balance`, {
         headers: {
           'Authorization': `Bearer ${secret}`
         }
@@ -500,8 +500,8 @@ export async function register (options: RegisterServerOptions) {
     }
   })
 
-  // Relay endpoint to forward platform admin withdrawal requests to the sidecar
-  router.post('/admin/withdraw', async (req: any, res: any) => {
+  // Relay endpoint to prepare platform admin withdrawal requests
+  router.post('/admin/prepare-withdraw', async (req: any, res: any) => {
     try {
       const user = await peertubeHelpers.user.getAuthUser(res)
       const roleId = typeof user?.role === 'object' ? (user.role as any).id : user?.role
@@ -513,12 +513,90 @@ export async function register (options: RegisterServerOptions) {
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
       const secret = await settingsManager.getSetting('webhook-secret') as string
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/seller/withdraw`, {
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/prepare-withdraw`, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${secret}`
+        }
+      })
+      const data = await response.json()
+      return res.status(response.status).json(data)
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message })
+    }
+  })
+
+  // Relay endpoint to complete platform admin withdrawal requests
+  router.post('/admin/complete-withdraw', async (req: any, res: any) => {
+    try {
+      const user = await peertubeHelpers.user.getAuthUser(res)
+      const roleId = typeof user?.role === 'object' ? (user.role as any).id : user?.role
+      if (!user || roleId !== 0) {
+        return res.status(401).json({ error: 'Unauthorized: Admin only' })
+      }
+
+      const baseUrl = await getBaseUrl()
+      if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
+
+      const secret = await settingsManager.getSetting('webhook-secret') as string
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/complete-withdraw`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${secret}`
+        },
+        body: JSON.stringify(req.body)
+      })
+      const data = await response.json()
+      return res.status(response.status).json(data)
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message })
+    }
+  })
+
+  // Relay endpoint to fetch admin stats from the sidecar
+  router.get('/admin/stats', async (req: any, res: any) => {
+    try {
+      const user = await peertubeHelpers.user.getAuthUser(res)
+      const roleId = typeof user?.role === 'object' ? (user.role as any).id : user?.role
+      if (!user || roleId !== 0) {
+        return res.status(401).json({ error: 'Unauthorized: Admin only' })
+      }
+
+      const baseUrl = await getBaseUrl()
+      if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
+
+      const secret = await settingsManager.getSetting('webhook-secret') as string
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/stats`, {
         headers: {
           'Authorization': `Bearer ${secret}`
         }
       })
+      const data = await response.json()
+      return res.status(response.status).json(data)
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message })
+    }
+  })
+
+  // Relay endpoint to fetch creator stats from the sidecar
+  router.get('/creator/stats', async (req: any, res: any) => {
+    try {
+      const user = await peertubeHelpers.user.getAuthUser(res)
+      if (!user) {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
+
+      const address = (req.query.address as string || '').trim()
+      if (!address) {
+        return res.status(400).json({ error: 'Missing address parameter' })
+      }
+
+      const baseUrl = await getBaseUrl()
+      if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
+
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/stats?address=${encodeURIComponent(address)}`)
       const data = await response.json()
       return res.status(response.status).json(data)
     } catch (err: any) {
@@ -560,10 +638,14 @@ export async function register (options: RegisterServerOptions) {
     let tesseraWallet = ''
     let isLocal = true
     let originInstanceUrl = peertubeHelpers.config.getWebserverUrl()
+    let videoUuid = videoId
+    let videoName = 'Unknown Video'
 
     try {
       const video = await loadVideoWithFallback(videoId) as any
       if (video) {
+        if (video.uuid) videoUuid = video.uuid
+        if (video.name) videoName = video.name
         isLocal = video.isLocal !== false
         if (!isLocal && video.url) {
           try {
@@ -622,7 +704,8 @@ export async function register (options: RegisterServerOptions) {
 
     const payloadData = {
       userId,
-      videoId,
+      videoId: videoUuid,
+      videoName,
       videoUrl,
       channelId,
       channelName,

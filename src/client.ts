@@ -327,6 +327,45 @@ export async function register (options: RegisterClientOptions) {
     return connected
   }
 
+  const updateCreatorStatsTable = async (wallet: string) => {
+    const statsDiv = creatorPanelEl?.querySelector('[data-tessera-stats]') as HTMLElement | null
+    if (!statsDiv) return
+    try {
+      const pluginRoute = peertubeHelpers.getBaseRouterRoute()
+      const authHeader = peertubeHelpers.getAuthHeader()
+      const res = await fetch(`${pluginRoute}/creator/stats?address=${encodeURIComponent(wallet)}`, {
+        headers: { ...authHeader }
+      })
+      const data = await res.json()
+      if (res.ok && data.stats && data.stats.length > 0) {
+        let html = `
+          <table style="width: 100%; border-collapse: collapse; font-size: 10px; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.1);">
+            <thead>
+              <tr style="text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); color: #90cdf4;">
+                <th style="padding: 4px 0;">Video ID</th>
+                <th style="padding: 4px 0; text-align: right;">Earnings</th>
+              </tr>
+            </thead>
+            <tbody>
+        `
+        for (const s of data.stats) {
+          html += `
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <td style="padding: 4px 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.videoName}</td>
+              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #48bb78;">$${Number(s.amount).toFixed(4)}</td>
+            </tr>
+          `
+        }
+        html += `</tbody></table>`
+        statsDiv.innerHTML = html
+      } else {
+        statsDiv.innerHTML = '<div style="font-size: 10px; color: #a0aec0; margin-top: 8px; text-align: center;">No stats available.</div>'
+      }
+    } catch (err) {
+      console.error('Failed to load creator stats:', err)
+    }
+  }
+
   const updateCreatorPanelBalance = async (wallet: string) => {
     if (!creatorPanelEl) return
     const balanceEl = creatorPanelEl.querySelector('[data-tessera-balance]') as HTMLElement | null
@@ -339,6 +378,7 @@ export async function register (options: RegisterClientOptions) {
         const withdrawable = Number(data.gatewayWithdrawable ?? data.gatewayAvailable ?? 0)
         balanceEl.textContent = `$${withdrawable.toFixed(4)} USDC`
       }
+      await updateCreatorStatsTable(wallet)
     } catch (err: any) {
       if (balanceEl) balanceEl.textContent = err?.message || 'Error'
     }
@@ -526,6 +566,7 @@ export async function register (options: RegisterClientOptions) {
       <button type="button" class="btn-balance" data-action="balance">Check Balance</button>
       <button type="button" class="btn-withdraw" data-action="withdraw">Withdraw Earnings</button>
       <div class="tessera-tx" data-tessera-tx style="font-size: 11px; text-align: center; margin-top: 8px; word-break: break-all;"></div>
+      <div class="tessera-stats" data-tessera-stats></div>
     `
 
     creatorPanelEl.querySelector('[data-action="balance"]')?.addEventListener('click', async (e) => {
@@ -562,6 +603,45 @@ export async function register (options: RegisterClientOptions) {
 
   // adminPanelEl is declared at the top of register() to avoid TDZ with hoisted renderAdminPanel.
 
+  const updateAdminStatsTable = async () => {
+    const statsDiv = adminPanelEl?.querySelector('[data-tessera-stats]') as HTMLElement | null
+    if (!statsDiv) return
+    try {
+      const pluginRoute = peertubeHelpers.getBaseRouterRoute()
+      const authHeader = peertubeHelpers.getAuthHeader()
+      const res = await fetch(`${pluginRoute}/admin/stats`, { headers: { ...authHeader } })
+      const data = await res.json()
+      if (res.ok && data.stats && data.stats.length > 0) {
+        let html = `
+          <table style="width: 100%; border-collapse: collapse; font-size: 10px; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.1);">
+            <thead>
+              <tr style="text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ecc94b;">
+                <th style="padding: 4px 0;">Video ID</th>
+                <th style="padding: 4px 0; text-align: right;">Display</th>
+                <th style="padding: 4px 0; text-align: right;">Origin</th>
+              </tr>
+            </thead>
+            <tbody>
+        `
+        for (const s of data.stats) {
+          html += `
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <td style="padding: 4px 0; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.videoName}</td>
+              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #48bb78;">$${Number(s.displayAmount).toFixed(4)}</td>
+              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #4299e1;">$${Number(s.originAmount).toFixed(4)}</td>
+            </tr>
+          `
+        }
+        html += `</tbody></table>`
+        statsDiv.innerHTML = html
+      } else {
+        statsDiv.innerHTML = '<div style="font-size: 10px; color: #a0aec0; margin-top: 8px; text-align: center;">No stats available.</div>'
+      }
+    } catch (err) {
+      console.error('Failed to load admin stats:', err)
+    }
+  }
+
   const updateAdminPanelBalance = async () => {
     const balanceEl = adminPanelEl?.querySelector('[data-tessera-balance]')
     if (balanceEl) balanceEl.textContent = 'Loading...'
@@ -579,9 +659,68 @@ export async function register (options: RegisterClientOptions) {
         const withdrawable = Number(data.available ?? 0)
         balanceEl.textContent = `$${withdrawable.toFixed(4)} USDC`
       }
+      await updateAdminStatsTable()
     } catch (err: any) {
       if (balanceEl) balanceEl.textContent = err?.message || 'Error'
     }
+  }
+
+  const withdrawAdminEarnings = async (adminWallet: string, txDiv?: HTMLElement | null) => {
+    if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Preparing withdrawal intent...</span>'
+    const connectedWallet = await connectCreatorWallet(adminWallet)
+
+    if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Fetching withdraw intent from Tessera...</span>'
+    const pluginRoute = peertubeHelpers.getBaseRouterRoute()
+    const authHeader = peertubeHelpers.getAuthHeader()
+    const prepareRes = await fetch(`${pluginRoute}/admin/prepare-withdraw`, {
+      method: 'POST',
+      headers: { ...authHeader }
+    })
+    const prepareData = await prepareRes.json()
+    if (!prepareRes.ok) throw new Error(prepareData.error || 'Could not prepare withdrawal')
+    if (prepareData.status === 'no_funds') {
+      peertubeHelpers.notifier.info('No withdrawable balance in Gateway.')
+      if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">No withdrawable balance.</span>'
+      return
+    }
+
+    if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Sign the BurnIntent popup in MetaMask...</span>'
+    const signature = await window.ethereum!.request({
+      method: 'eth_signTypedData_v4',
+      params: [connectedWallet, JSON.stringify(prepareData.typedData)]
+    }) as string
+
+    if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Submitting signature to Tessera...</span>'
+    const completeRes = await fetch(`${pluginRoute}/admin/complete-withdraw`, {
+      method: 'POST',
+      headers: {
+        ...authHeader,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        burnIntent: prepareData.burnIntent,
+        signature
+      })
+    })
+    const completeData = await completeRes.json()
+    if (!completeRes.ok) throw new Error(completeData.error || 'Withdraw attestation failed')
+
+    completeData.txRequest.from = connectedWallet
+    if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Confirm the mint transaction in MetaMask...</span>'
+    const txHash = await window.ethereum!.request({
+      method: 'eth_sendTransaction',
+      params: [completeData.txRequest]
+    }) as string
+
+    if (txDiv) {
+      txDiv.innerHTML = `
+        <a href="https://testnet.arcscan.app/tx/${txHash}" target="_blank" style="color: #38a169; text-decoration: underline; font-weight: 600; display: block; margin-top: 4px;">
+          🧾 View Transaction on Arcscan
+        </a>
+      `
+    }
+    peertubeHelpers.notifier.success(`Withdrawal submitted! Tx: ${txHash.slice(0, 10)}…`)
+    await updateAdminPanelBalance()
   }
 
   async function renderAdminPanel() {
@@ -688,6 +827,7 @@ export async function register (options: RegisterClientOptions) {
       <button type="button" class="btn-balance" data-action="balance">Check Balance</button>
       <button type="button" class="btn-withdraw" data-action="withdraw">Withdraw to Wallet</button>
       <div class="tessera-tx" data-tessera-tx style="font-size: 11px; text-align: center; margin-top: 8px; word-break: break-all;"></div>
+      <div class="tessera-stats" data-tessera-stats></div>
     `
 
     adminPanelEl.querySelector('[data-action="balance"]')?.addEventListener('click', async (e) => {
@@ -709,30 +849,7 @@ export async function register (options: RegisterClientOptions) {
       if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Initiating withdrawal...</span>'
       try {
         peertubeHelpers.notifier.info('Initiating withdrawal...')
-        const pluginRoute = peertubeHelpers.getBaseRouterRoute()
-        const authHeader = peertubeHelpers.getAuthHeader()
-        const res = await fetch(`${pluginRoute}/admin/withdraw`, {
-          method: 'POST',
-          headers: {
-            ...authHeader
-          }
-        })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error || 'Withdraw failed')
-        if (data.status === 'no_funds') {
-          peertubeHelpers.notifier.info('No withdrawable balance in Gateway.')
-          if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">No withdrawable balance.</span>'
-        } else {
-          if (txDiv) {
-            txDiv.innerHTML = `
-              <a href="https://testnet.arcscan.app/tx/${data.txHash}" target="_blank" style="color: #38a169; text-decoration: underline; font-weight: 600; display: block; margin-top: 4px;">
-                🧾 View Transaction on Arcscan
-              </a>
-            `
-          }
-          peertubeHelpers.notifier.success(`Withdrawn ${data.withdrawnAmount} USDC! Tx: ${data.txHash.slice(0, 10)}…`)
-        }
-        await updateAdminPanelBalance()
+        await withdrawAdminEarnings(adminWallet, txDiv)
       } catch (err: any) {
         if (txDiv) txDiv.innerHTML = `<span style="color: #e53e3e;">Error: ${err?.message || 'Withdraw failed'}</span>`
         peertubeHelpers.notifier.error(err?.message || 'Withdraw failed')
