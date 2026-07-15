@@ -277,8 +277,38 @@ export async function register (options: RegisterServerOptions) {
     name: 'admin-wallet-address',
     label: 'Admin Wallet (Arc Network)',
     type: 'input',
-    descriptionHTML: 'Platform admin wallet address for receiving commission. Private key goes in Tessera .env.',
+    descriptionHTML: 'Platform admin wallet address for receiving commission. Withdrawals are executed no-custodially via MetaMask.',
     default: '',
+    private: false
+  })
+
+  await registerSetting({
+    name: 'tessera-display-fee',
+    label: 'Display Fee (Platform Commission)',
+    type: 'select',
+    options: [
+      { label: '0%', value: '0.00' },
+      { label: '10%', value: '0.10' },
+      { label: '20%', value: '0.20' },
+      { label: '30%', value: '0.30' }
+    ],
+    default: '0.10',
+    descriptionHTML: 'The commission percentage charged to creators when viewers watch videos directly on this instance.',
+    private: false
+  })
+
+  await registerSetting({
+    name: 'tessera-origin-fee',
+    label: 'Origin Fee (Hosting Commission)',
+    type: 'select',
+    options: [
+      { label: '0%', value: '0.00' },
+      { label: '10%', value: '0.10' },
+      { label: '20%', value: '0.20' },
+      { label: '30%', value: '0.30' }
+    ],
+    default: '0.10',
+    descriptionHTML: 'The commission percentage charged to creators when viewers watch videos federated from this instance on another platform.',
     private: false
   })
 
@@ -399,7 +429,7 @@ export async function register (options: RegisterServerOptions) {
     }
   }
 
-  // Endpoint for the client script to retrieve the base URL
+  // Endpoint for the client script to retrieve the base URL and current instance fees
   router.get('/base-url', async (req: any, res: any) => {
     let baseUrl = await getBaseUrl()
     if (!baseUrl) {
@@ -408,7 +438,15 @@ export async function register (options: RegisterServerOptions) {
     if (baseUrl.includes('host.docker.internal')) {
       baseUrl = baseUrl.replace('host.docker.internal', 'localhost')
     }
-    res.json({ baseUrl })
+
+    const displayFeeStr = await settingsManager.getSetting('tessera-display-fee') as string || '0.10'
+    const originFeeStr = await settingsManager.getSetting('tessera-origin-fee') as string || '0.10'
+
+    res.json({
+      baseUrl,
+      displayFee: parseFloat(displayFeeStr),
+      originFee: parseFloat(originFeeStr)
+    })
   })
 
   // Endpoint to serve pluginData to the client (since frontend doesn't receive it in the watch hook)

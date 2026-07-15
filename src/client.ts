@@ -75,7 +75,7 @@ export async function register (options: RegisterClientOptions) {
       const modeField = {
         name: 'tessera-mode',
         label: 'Tessera Monetization Mode',
-        descriptionHTML: 'Choose how viewers pay for this video.',
+        descriptionHTML: 'Choose how viewers pay for this video. <div id="tessera-instance-fee-info" style="margin-top: 8px; font-weight: 500; color: #a0aec0;">Loading platform fee information...</div>',
         type: 'select' as const,
         options: [
             { value: 'pay-per-second', label: '⚡ Pay-per-second (private)' },
@@ -125,6 +125,30 @@ export async function register (options: RegisterClientOptions) {
     const data = await response.json()
     if (data.baseUrl) {
       baseUrl = data.baseUrl
+
+      // Dynamically display platform fees in creator upload form
+      const displayFee = data.displayFee !== undefined ? data.displayFee : 0.10;
+      const originFee = data.originFee !== undefined ? data.originFee : 0.10;
+
+      const updateFeeInfoHTML = () => {
+        const feeInfoEl = document.getElementById('tessera-instance-fee-info');
+        if (feeInfoEl) {
+          feeInfoEl.innerHTML = `
+            <div style="background: rgba(49, 130, 206, 0.1); border-left: 3px solid #3182ce; padding: 10px 14px; border-radius: 6px; font-size: 12px; color: #cbd5e0; margin-top: 10px; font-family: system-ui, -apple-system, sans-serif;">
+              <span style="color: #63b3ed; font-weight: bold; display: block; margin-bottom: 4px;">📊 Platform Fees:</span>
+              <ul style="margin: 0; padding-left: 18px; list-style-type: disc; line-height: 1.5;">
+                <li><strong>Display Fee:</strong> ${(displayFee * 100).toFixed(0)}% commission if the video is watched directly on this site (you receive the ${(100 - displayFee * 100).toFixed(0)}% remainder).</li>
+                <li><strong>Origin Fee:</strong> ${(originFee * 100).toFixed(0)}% commission if your video is watched federated on another external server (the viewer's server display fee will also apply).</li>
+              </ul>
+            </div>
+          `;
+        }
+      };
+
+      // Periodic check because PeerTube's SPA renders forms asynchronously after route shifts
+      updateFeeInfoHTML();
+      setInterval(updateFeeInfoHTML, 1000);
+
     } else {
       console.warn('[tessera] Missing base URL configuration.')
       return
