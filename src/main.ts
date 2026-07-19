@@ -449,7 +449,101 @@ export async function register (options: RegisterServerOptions) {
     })
   })
 
-  // Endpoint to serve pluginData to the client (since frontend doesn't receive it in the watch hook)
+  // ─── Browser relay routes ──────────────────────────────────────────────────
+  // These routes allow the browser to call the Tessera sidecar through PeerTube's
+  // plugin router, eliminating the need for a publicly accessible sidecar URL.
+  // All requests are forwarded to the internal sidecar via getBaseUrl().
+
+  // Relay: serve paywall.bundle.js from the sidecar (browser downloads from PeerTube domain)
+  router.get('/assets/paywall.bundle.js', async (req: any, res: any) => {
+    const internalUrl = await getBaseUrl()
+    if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
+    try {
+      const response = await fetch(`${internalUrl}/peertube-assets/paywall.bundle.js`, {
+        signal: AbortSignal.timeout(10000)
+      })
+      if (!response.ok) return res.status(response.status).send('Failed to fetch asset from sidecar')
+      const content = await response.text()
+      res.set('Content-Type', 'application/javascript; charset=utf-8')
+      res.set('Cache-Control', 'public, max-age=300')
+      return res.send(content)
+    } catch (err: any) {
+      peertubeHelpers.logger.error(`[tessera] Asset relay error (paywall.bundle.js): ${err.message}`)
+      return res.status(502).json({ error: 'Could not reach Tessera sidecar' })
+    }
+  })
+
+  // Relay: serve paywall.css from the sidecar
+  router.get('/assets/paywall.css', async (req: any, res: any) => {
+    const internalUrl = await getBaseUrl()
+    if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
+    try {
+      const response = await fetch(`${internalUrl}/peertube-assets/paywall.css`, {
+        signal: AbortSignal.timeout(10000)
+      })
+      if (!response.ok) return res.status(response.status).send('Failed to fetch asset from sidecar')
+      const content = await response.text()
+      res.set('Content-Type', 'text/css; charset=utf-8')
+      res.set('Cache-Control', 'public, max-age=300')
+      return res.send(content)
+    } catch (err: any) {
+      peertubeHelpers.logger.error(`[tessera] Asset relay error (paywall.css): ${err.message}`)
+      return res.status(502).json({ error: 'Could not reach Tessera sidecar' })
+    }
+  })
+
+  // Relay: forward all /api/core/* requests from the browser to the sidecar.
+  // This covers: register-session, recover-session, session-balance, tip, tip-access,
+  // top-up, wallet-balance, stream-access, and all /circle/* sub-routes.
+  router.all('/api/core/*', async (req: any, res: any) => {
+    const internalUrl = await getBaseUrl()
+    if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
+
+    try {
+      const qs = Object.keys(req.query).length > 0
+        ? '?' + new URLSearchParams(req.query as Record<string, string>).toString()
+        : ''
+      const targetUrl = `${internalUrl}${req.path}${qs}`
+      const isReadOnly = ['GET', 'HEAD'].includes((req.method as string).toUpperCase())
+
+      const response = await fetch(targetUrl, {
+        method: req.method,
+        headers: { 'Content-Type': 'application/json' },
+        body: isReadOnly ? undefined : JSON.stringify(req.body),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      })
+
+      const data = await response.json()
+      return res.status(response.status).json(data)
+    } catch (err: any) {
+      peertubeHelpers.logger.error(`[tessera] Core API relay error (${req.path}): ${err.message}`)
+      return res.status(502).json({ error: 'Could not reach Tessera sidecar' })
+    }
+  })
+
+  // Relay: expose sidecar instance-info through PeerTube's plugin URL for federation discovery.
+  // Remote PeerTube servers can query:
+  //   GET https://peertube.remote.com/plugins/peertube-plugin-tessera/{version}/router/instance-info
+  // to obtain the admin wallet and fee configuration of the origin instance,
+  // without needing the sidecar to have a public URL.
+  router.get('/instance-info', async (req: any, res: any) => {
+    const internalUrl = await getBaseUrl()
+    if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
+    try {
+      const response = await fetch(`${internalUrl}/api/tessera/instance-info`, {
+        signal: AbortSignal.timeout(5000)
+      })
+      const data = await response.json()
+      return res.status(response.status).json(data)
+    } catch (err: any) {
+      peertubeHelpers.logger.error(`[tessera] instance-info relay error: ${err.message}`)
+      return res.status(502).json({ error: 'Could not reach Tessera sidecar' })
+    }
+  })
+
+  // ──────────────────────────────────────────────────────────────────────────
+
+
   router.get('/video/:id/tessera-data', async (req: any, res: any) => {
     const videoId = req.params.id
     try {
