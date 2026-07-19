@@ -118,9 +118,11 @@ export async function register (options: RegisterClientOptions) {
   }
 
   // 2. Fetch Tessera Base URL from plugin router
+  // pluginRoute is declared here (outer scope) so it remains accessible
+  // after the try block for asset injection and creator panel calls.
+  const pluginRoute = peertubeHelpers.getBaseRouterRoute()
   let baseUrl: string
   try {
-    const pluginRoute = peertubeHelpers.getBaseRouterRoute()
     const response = await fetch(`${pluginRoute}/base-url`)
     const data = await response.json()
     if (data.baseUrl) {
@@ -271,15 +273,15 @@ export async function register (options: RegisterClientOptions) {
   })
   observer.observe(document.body, { attributes: true, attributeFilter: ['class'] })
 
-  // 3. Inject Tessera paywall assets dynamically
+  // 3. Inject Tessera paywall assets via plugin relay (browser never contacts sidecar directly)
   const cssLink = document.createElement('link')
   cssLink.rel = 'stylesheet'
-  cssLink.href = `${baseUrl}/peertube-assets/paywall.css`
+  cssLink.href = `${pluginRoute}/assets/paywall.css`
   document.head.appendChild(cssLink)
 
   const script = document.createElement('script')
-  // Cache-bust so browsers pick up rebuilt paywall.bundle.js from Tessera backend
-  script.src = `${baseUrl}/peertube-assets/paywall.bundle.js?v=1.1.1-media-sync`
+  // Cache-bust so browsers pick up rebuilt paywall.bundle.js after deployments
+  script.src = `${pluginRoute}/assets/paywall.bundle.js?v=1.2.0`
   let pendingMediaPlaying: boolean | null = null
   script.onload = () => {
     if (pendingMediaPlaying !== null) {
@@ -371,7 +373,7 @@ export async function register (options: RegisterClientOptions) {
     const balanceEl = creatorPanelEl.querySelector('[data-tessera-balance]') as HTMLElement | null
     if (balanceEl) balanceEl.textContent = 'Loading…'
     try {
-      const res = await fetch(`${baseUrl}/api/connectors/peertube/creator/balance?address=${encodeURIComponent(wallet)}`)
+      const res = await fetch(`${pluginRoute}/creator/balance?address=${encodeURIComponent(wallet)}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Balance fetch failed')
       if (balanceEl) {
@@ -389,7 +391,7 @@ export async function register (options: RegisterClientOptions) {
     const connectedWallet = await connectCreatorWallet(wallet)
 
     if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Fetching withdraw intent from Tessera...</span>'
-    const prepareRes = await fetch(`${baseUrl}/api/connectors/peertube/creator/prepare-withdraw`, {
+    const prepareRes = await fetch(`${pluginRoute}/creator/prepare-withdraw`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: connectedWallet })
@@ -409,7 +411,7 @@ export async function register (options: RegisterClientOptions) {
     }) as string
 
     if (txDiv) txDiv.innerHTML = '<span style="color: #a0aec0;">Submitting signature to Tessera...</span>'
-    const completeRes = await fetch(`${baseUrl}/api/connectors/peertube/creator/complete-withdraw`, {
+    const completeRes = await fetch(`${pluginRoute}/creator/complete-withdraw`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
