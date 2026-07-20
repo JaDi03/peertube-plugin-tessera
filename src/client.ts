@@ -121,12 +121,10 @@ export async function register (options: RegisterClientOptions) {
   // pluginRoute is declared here (outer scope) so it remains accessible
   // after the try block for asset injection and creator panel calls.
   const pluginRoute = peertubeHelpers.getBaseRouterRoute()
-  let baseUrl: string
   try {
     const response = await fetch(`${pluginRoute}/base-url`)
     const data = await response.json()
     if (data.baseUrl) {
-      baseUrl = data.baseUrl
 
       // Dynamically display platform fees in creator upload form
       const displayFee = data.displayFee !== undefined ? data.displayFee : 0.10;

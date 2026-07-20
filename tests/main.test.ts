@@ -14,7 +14,8 @@ describe('PeerTube Plugin Tessera - Server', () => {
       settingsManager,
       getRouter: vi.fn(() => ({
         get: vi.fn(),
-        post: vi.fn()
+        post: vi.fn(),
+        all: vi.fn()
       })),
       peertubeHelpers: {
         logger: {
@@ -51,5 +52,6 @@ describe('PeerTube Plugin Tessera - Server', () => {
     expect(mockRouter.get).toHaveBeenCalledWith('/admin/stats', expect.any(Function))
     expect(mockRouter.get).toHaveBeenCalledWith('/creator/stats', expect.any(Function))
     expect(mockRouter.post).toHaveBeenCalledWith('/ping', expect.any(Function))
+    expect(mockRouter.all).toHaveBeenCalledWith('/api/core/*', expect.any(Function))
   })
 })
