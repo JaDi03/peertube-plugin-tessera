@@ -698,6 +698,61 @@ export async function register (options: RegisterServerOptions) {
     }
   })
 
+  // Relay endpoint to fetch per-creator Gateway balance from the sidecar
+  router.get('/creator/balance', async (req: any, res: any) => {
+    try {
+      const address = (req.query.address as string || '').trim()
+      if (!address) {
+        return res.status(400).json({ error: 'Missing address parameter' })
+      }
+
+      const baseUrl = await getBaseUrl()
+      if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
+
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/balance?address=${encodeURIComponent(address)}`)
+      const data = await response.json()
+      return res.status(response.status).json(data)
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message })
+    }
+  })
+
+  // Relay endpoint to prepare creator withdrawal intent from the sidecar
+  router.post('/creator/prepare-withdraw', async (req: any, res: any) => {
+    try {
+      const baseUrl = await getBaseUrl()
+      if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
+
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/prepare-withdraw`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body)
+      })
+      const data = await response.json()
+      return res.status(response.status).json(data)
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message })
+    }
+  })
+
+  // Relay endpoint to complete creator withdrawal attestation from the sidecar
+  router.post('/creator/complete-withdraw', async (req: any, res: any) => {
+    try {
+      const baseUrl = await getBaseUrl()
+      if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
+
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/complete-withdraw`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body)
+      })
+      const data = await response.json()
+      return res.status(response.status).json(data)
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message })
+    }
+  })
+
   // Ping route handler
   router.post('/ping', async (req: any, res: any) => {
     // 5.3 Runtime type validation
