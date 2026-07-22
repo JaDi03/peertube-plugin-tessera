@@ -454,40 +454,37 @@ export async function register (options: RegisterServerOptions) {
   // plugin router, eliminating the need for a publicly accessible sidecar URL.
   // All requests are forwarded to the internal sidecar via getBaseUrl().
 
-  // Relay: serve paywall.bundle.js from the sidecar (browser downloads from PeerTube domain)
-  router.get('/assets/paywall.bundle.js', async (req: any, res: any) => {
+  // Relay: serve static assets (paywall.bundle.js, paywall.css, logo_yellow.svg, etc.) from the sidecar
+  router.get('/assets/:filename', async (req: any, res: any) => {
     const internalUrl = await getBaseUrl()
     if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
+    const filename = req.params.filename as string
     try {
-      const response = await fetch(`${internalUrl}/peertube-assets/paywall.bundle.js`, {
+      const response = await fetch(`${internalUrl}/peertube-assets/${encodeURIComponent(filename)}`, {
         signal: AbortSignal.timeout(10000)
       })
       if (!response.ok) return res.status(response.status).send('Failed to fetch asset from sidecar')
-      const content = await response.text()
-      res.set('Content-Type', 'application/javascript; charset=utf-8')
-      res.set('Cache-Control', 'public, max-age=300')
-      return res.send(content)
-    } catch (err: any) {
-      peertubeHelpers.logger.error(`[tessera] Asset relay error (paywall.bundle.js): ${err.message}`)
-      return res.status(502).json({ error: 'Could not reach Tessera sidecar' })
-    }
-  })
 
-  // Relay: serve paywall.css from the sidecar
-  router.get('/assets/paywall.css', async (req: any, res: any) => {
-    const internalUrl = await getBaseUrl()
-    if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
-    try {
-      const response = await fetch(`${internalUrl}/peertube-assets/paywall.css`, {
-        signal: AbortSignal.timeout(10000)
-      })
-      if (!response.ok) return res.status(response.status).send('Failed to fetch asset from sidecar')
-      const content = await response.text()
-      res.set('Content-Type', 'text/css; charset=utf-8')
+      let contentType = 'application/octet-stream'
+      if (filename.endsWith('.js')) {
+        contentType = 'application/javascript; charset=utf-8'
+      } else if (filename.endsWith('.css')) {
+        contentType = 'text/css; charset=utf-8'
+      } else if (filename.endsWith('.svg')) {
+        contentType = 'image/svg+xml'
+      } else if (filename.endsWith('.png')) {
+        contentType = 'image/png'
+      } else if (filename.endsWith('.ico')) {
+        contentType = 'image/x-icon'
+      }
+
+      const arrayBuffer = await response.arrayBuffer()
+      const buffer = Buffer.from(arrayBuffer)
+      res.set('Content-Type', contentType)
       res.set('Cache-Control', 'public, max-age=300')
-      return res.send(content)
+      return res.send(buffer)
     } catch (err: any) {
-      peertubeHelpers.logger.error(`[tessera] Asset relay error (paywall.css): ${err.message}`)
+      peertubeHelpers.logger.error(`[tessera] Asset relay error (${filename}): ${err.message}`)
       return res.status(502).json({ error: 'Could not reach Tessera sidecar' })
     }
   })

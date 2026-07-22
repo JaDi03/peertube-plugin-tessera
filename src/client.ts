@@ -188,6 +188,7 @@ export async function register (options: RegisterClientOptions) {
   let currentVideoId: string | null = null
   let currentVideoOwner: string | null = null
   let currentCreatorWallet: string | null = null
+  let currentPlayerElement: HTMLElement | null = null
   let creatorPanelEl: HTMLElement | null = null
   // Must be declared here (not near renderAdminPanel) to avoid Temporal Dead Zone:
   // renderAdminPanel is a hoisted function declaration and is called early in register().
@@ -916,16 +917,38 @@ export async function register (options: RegisterClientOptions) {
       return
     }
 
+    const targetContainer = currentPlayerElement || document.querySelector('.peertube-player-container, .video-js, video-player')
+
     if (mode === 'free') {
       console.log('[tessera] Free video detected. Calling ArcCashier.initTipMode()')
       // Ensure no lingering lock from a previous pay-per-second video
       document.body.classList.remove('arc-locked')
       arcCashier.initTipMode(wallet || '', tipAmount || '0.10')
     } else {
-      console.log('[tessera] Pay-per-second video detected. Calling ArcCashier.initPaywall()')
-      arcCashier.initPaywall()
+      console.log('[tessera] Pay-per-second video detected. Calling ArcCashier.initPaywall() with target container:', targetContainer)
+      arcCashier.initPaywall(targetContainer)
     }
   }
+
+  registerHook({
+    target: 'action:video-watch.player.loaded',
+    handler: (params: any) => {
+      if (params) {
+        currentPlayerElement = params.playerElement || params.player?.el() || null
+        console.log('[tessera] Player loaded hook triggered. Player element:', currentPlayerElement)
+      }
+    }
+  })
+
+  registerHook({
+    target: 'action:embed.player.loaded',
+    handler: (params: any) => {
+      if (params) {
+        currentPlayerElement = params.playerElement || params.player?.el() || null
+        console.log('[tessera] Embed player loaded hook triggered. Player element:', currentPlayerElement)
+      }
+    }
+  })
 
   registerHook({
     target: 'action:video-watch.video.loaded',
