@@ -211,7 +211,7 @@ export async function register (options: RegisterClientOptions) {
   }
 
   const checkPageVisibility = () => {
-      const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/')
+      const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/') || window.location.pathname.includes('/embed/')
       const hideWhileResolvingOwner = isWatchPage
         && peertubeHelpers.isLoggedIn()
         && (pendingOwnerCheck || currentVideoOwner === null)
@@ -226,10 +226,10 @@ export async function register (options: RegisterClientOptions) {
   }
 
   const prefetchVideoOwner = async () => {
-    const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/')
-    if (!isWatchPage || !peertubeHelpers.isLoggedIn()) return
+    const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/') || window.location.pathname.includes('/embed/')
+    if (!isWatchPage) return
 
-    const match = window.location.pathname.match(/\/(?:watch|w)\/([^/?#]+)/)
+    const match = window.location.pathname.match(/\/(?:watch|w|embed)\/([^/?#]+)/)
     if (!match?.[1]) return
 
     pendingOwnerCheck = true
@@ -863,21 +863,24 @@ export async function register (options: RegisterClientOptions) {
     void updateAdminPanelBalance()
   }
 
-  // Returns wallet, rate, and mode for the given video (from pluginData or server).
+  // Returns wallet, rate, mode, isLocal, and originInstanceUrl for the given video.
   const loadTesseraDataForVideo = async (
     video: { pluginData?: unknown } | null | undefined,
     videoId: string | null
-  ): Promise<{ wallet: string | null, rate: string | null, mode: string, tipAmount: string | null }> => {
+  ): Promise<{ wallet: string | null, rate: string | null, mode: string, tipAmount: string | null, isLocal: boolean, originInstanceUrl: string | null }> => {
     currentCreatorWallet = readWalletFromVideo(video)
 
     if (!videoId) {
       renderCreatorPanel()
-      return { wallet: currentCreatorWallet, rate: null, mode: 'pay-per-second', tipAmount: null }
+      return { wallet: currentCreatorWallet, rate: null, mode: 'pay-per-second', tipAmount: null, isLocal: true, originInstanceUrl: null }
     }
 
     let rate: string | null = null
     let mode = 'pay-per-second' // safe default: always block unless explicitly free
     let tipAmount: string | null = null
+    let isLocal = true
+    let originInstanceUrl: string | null = null
+
     try {
       const pluginRoute = peertubeHelpers.getBaseRouterRoute()
       const res = await fetch(`${pluginRoute}/video/${videoId}/tessera-data`)
@@ -887,24 +890,26 @@ export async function register (options: RegisterClientOptions) {
         if (data.rate) rate = data.rate
         if (data.mode) mode = data.mode
         if (data.tipAmount) tipAmount = data.tipAmount
+        if (data.isLocal !== undefined) isLocal = Boolean(data.isLocal)
+        if (data.originInstanceUrl) originInstanceUrl = data.originInstanceUrl
       }
     } catch (err) {
       console.error('[tessera] Failed to fetch tessera data:', err)
     }
 
     renderCreatorPanel()
-    return { wallet: currentCreatorWallet, rate, mode, tipAmount }
+    return { wallet: currentCreatorWallet, rate, mode, tipAmount, isLocal, originInstanceUrl }
   }
 
   // Initializes the paywall engine for the current video mode.
   // Guards against double-initialization across hook re-fires.
-  const initPaywallEngine = (mode: string | null, wallet: string | null, tipAmount?: string | null) => {
+  const initPaywallEngine = (mode: string | null, wallet: string | null, tipAmount?: string | null, isLocal = true, originInstanceUrl?: string | null) => {
     if (paywallInitialized) return
 
-    // If the video has no wallet address configured and is not explicitly a free video,
-    // it is a standard unmonetized video. We must bypass the paywall entirely.
-    if (!wallet && mode !== 'free') {
-      console.log('[tessera] Video is unmonetized (no wallet address set). Bypassing paywall.')
+    // If a LOCAL video has no wallet address and is not explicitly free, bypass.
+    // Remote/federated videos (!isLocal) must NEVER be bypassed because they are monetized at origin.
+    if (isLocal && !wallet && mode !== 'free') {
+      console.log('[tessera] Local video is unmonetized (no wallet address set). Bypassing paywall.')
       document.body.classList.remove('arc-locked')
       return
     }
@@ -912,21 +917,129 @@ export async function register (options: RegisterClientOptions) {
     paywallInitialized = true
 
     const arcCashier = (window as any).ArcCashier
-    if (!arcCashier) {
-      console.warn('[tessera] ArcCashier not available yet — paywall.bundle.js may still be loading.')
-      return
-    }
-
     const targetContainer = currentPlayerElement || document.querySelector('.peertube-player-container, .video-js, video-player')
 
-    if (mode === 'free') {
+    if (mode === 'free' && isLocal) {
       console.log('[tessera] Free video detected. Calling ArcCashier.initTipMode()')
-      // Ensure no lingering lock from a previous pay-per-second video
       document.body.classList.remove('arc-locked')
-      arcCashier.initTipMode(wallet || '', tipAmount || '0.10')
+      if (arcCashier) arcCashier.initTipMode(wallet || '', tipAmount || '0.10')
     } else {
-      console.log('[tessera] Pay-per-second video detected. Calling ArcCashier.initPaywall() with target container:', targetContainer)
-      arcCashier.initPaywall(targetContainer)
+      console.log('[tessera] Monetized video detected (isLocal:', isLocal, '). Setting up paywall/teaser.')
+      if (arcCashier && isLocal) {
+        arcCashier.initPaywall(targetContainer)
+      }
+
+      const TEASER_PREVIEW_LIMIT_SECONDS = 5
+
+      const showTeaserOverlay = () => {
+        let teaserNoticeEl = document.getElementById('tessera-teaser-notice')
+        if (!teaserNoticeEl) {
+          const hostContainer = currentPlayerElement || targetContainer || document.querySelector('.peertube-player-container, .video-js, video-player, body')
+          if (hostContainer) {
+            teaserNoticeEl = document.createElement('div')
+            teaserNoticeEl.id = 'tessera-teaser-notice'
+            teaserNoticeEl.style.cssText = 'position: absolute; inset: 0; background: rgba(0, 0, 0, 0.88); backdrop-filter: blur(10px); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 999999; color: #fff; text-align: center; padding: 16px; font-family: system-ui, -apple-system, sans-serif;'
+            
+            const targetUrl = originInstanceUrl || window.location.href
+            const pluginRoute = peertubeHelpers.getBaseRouterRoute()
+            teaserNoticeEl.innerHTML = `
+              <div style="background: rgba(13, 17, 23, 0.96); border: 1px solid rgba(255, 179, 0, 0.5); border-radius: 16px; padding: 24px 26px; max-width: 360px; width: 90%; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8), 0 0 30px rgba(255, 179, 0, 0.2); text-align: center;">
+                <div style="background: rgba(255, 179, 0, 0.15); color: #ffb300; border: 1px solid rgba(255, 179, 0, 0.4); font-size: 11px; padding: 4px 12px; border-radius: 12px; display: inline-block; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px;">
+                  ⏱️ Avance de 5s Finalizado
+                </div>
+                <h3 style="margin: 0 0 8px 0; color: #ffffff; font-size: 17px; font-weight: 700;">Video Monetizado con Tessera</h3>
+                <p style="margin: 0 0 18px 0; color: #a0aec0; font-size: 13px; line-height: 1.5;">
+                  Este video utiliza pago por segundo. Disfrútalo completo realizando el pago en la instancia original.
+                </p>
+                <a href="${targetUrl}" target="_blank" rel="noopener" style="display: block; width: 100%; box-sizing: border-box; background: linear-gradient(135deg, #ffb300 0%, #d69e2e 100%); color: #000000; font-weight: 700; text-decoration: none; padding: 12px 16px; border-radius: 10px; font-size: 14px; box-shadow: 0 4px 16px rgba(255, 179, 0, 0.35); transition: transform 0.15s ease;">
+                  ⚡ Continuar Viendo en Instancia Origen
+                </a>
+              </div>
+            `
+            hostContainer.appendChild(teaserNoticeEl)
+          }
+        }
+      }
+
+      const bindTeaserToVideo = (v: HTMLVideoElement) => {
+        if (!v || (v as any).__tesseraTeaserBound) return
+        ;(v as any).__tesseraTeaserBound = true
+
+        const checkTime = () => {
+          if (isVideoOwner()) return
+          const isPaidSessionActive = Boolean((window as any).ArcCashier?.isSessionActive || (window as any).arcSessionUnlocked)
+          if (isPaidSessionActive) return
+
+          if (v.currentTime >= TEASER_PREVIEW_LIMIT_SECONDS || v.ended) {
+            v.pause()
+            document.body.classList.add('arc-locked')
+            console.log('[tessera] Teaser preview limit (5s) reached. Showing overlay notice.')
+            showTeaserOverlay()
+          }
+        }
+
+        v.addEventListener('timeupdate', checkTime)
+        v.addEventListener('ended', checkTime)
+      }
+
+      const observeVideoElement = () => {
+        const existingVideo = targetContainer?.querySelector('video') || document.querySelector('video')
+        if (existingVideo) {
+          bindTeaserToVideo(existingVideo)
+          return
+        }
+
+        let attempts = 0
+        const interval = setInterval(() => {
+          attempts++
+          const v = targetContainer?.querySelector('video') || document.querySelector('video')
+          if (v) {
+            clearInterval(interval)
+            bindTeaserToVideo(v)
+          } else if (attempts >= 40) {
+            clearInterval(interval)
+          }
+        }, 250)
+      }
+
+      observeVideoElement()
+    }
+  }
+
+  const handleVideoLoaded = async (video: any) => {
+    await cleanupVideoState()
+
+    if (video) {
+      // Reset initialization state for each new video
+      paywallInitialized = false
+
+      currentVideoId = video.uuid || video.id?.toString() || null
+      currentVideoOwner = video.account?.name || video.channel?.ownerAccount?.name || null
+
+      // Owner is now known — remove the resolving guard so the overlay
+      // fades in for regular users (checkPageVisibility keeps it hidden for owners)
+      document.body.classList.remove('arc-resolving-owner')
+      checkPageVisibility()
+
+      const { rate, mode, wallet, tipAmount, isLocal, originInstanceUrl } = await loadTesseraDataForVideo(video, currentVideoId)
+
+      // Initialize paywall engine based on the video's monetization mode
+      if (!isVideoOwner()) {
+        // Wait for the paywall bundle to be available (script may still be loading on first visit)
+        const waitForBundle = () => new Promise<void>((resolve) => {
+          if ((window as any).ArcCashier) return resolve()
+          script.addEventListener('load', () => resolve(), { once: true })
+        })
+        await waitForBundle()
+        initPaywallEngine(mode, wallet, tipAmount, isLocal, originInstanceUrl)
+      }
+
+      if ((window as any).arcResetVideoSession) {
+        const rateNum = rate ? parseFloat(rate) : null
+        ;(window as any).arcResetVideoSession(rateNum ?? undefined)
+        console.log(`[tessera] arcResetVideoSession called with rate=${rate ?? 'default'}`)
+      }
+      videoJustChanged = true
     }
   }
 
@@ -942,10 +1055,28 @@ export async function register (options: RegisterClientOptions) {
 
   registerHook({
     target: 'action:embed.player.loaded',
-    handler: (params: any) => {
+    handler: async (params: any) => {
       if (params) {
         currentPlayerElement = params.playerElement || params.player?.el() || null
         console.log('[tessera] Embed player loaded hook triggered. Player element:', currentPlayerElement)
+
+        const video = params.video || params.player?.video
+        if (video) {
+          await handleVideoLoaded(video)
+        } else {
+          const vId = getCurrentVideoId()
+          if (vId) {
+            try {
+              const res = await fetch(`/api/v1/videos/${encodeURIComponent(vId)}`)
+              if (res.ok) {
+                const fetchedVideo = await res.json()
+                await handleVideoLoaded(fetchedVideo)
+              }
+            } catch (err) {
+              console.error('[tessera] Embed video fetch failed:', err)
+            }
+          }
+        }
       }
     }
   })
@@ -953,44 +1084,8 @@ export async function register (options: RegisterClientOptions) {
   registerHook({
     target: 'action:video-watch.video.loaded',
     handler: async (params: any) => {
-      await cleanupVideoState()
-
       if (params && params.video) {
-        // Reset initialization state for each new video
-        paywallInitialized = false
-
-        currentVideoId = params.video.uuid || params.video.id?.toString() || null
-        currentVideoOwner = params.video.account?.name || params.video.channel?.ownerAccount?.name || null
-
-        // Owner is now known — remove the resolving guard so the overlay
-        // fades in for regular users (checkPageVisibility keeps it hidden for owners)
-        document.body.classList.remove('arc-resolving-owner')
-        checkPageVisibility()
-
-        const { rate, mode, wallet, tipAmount } = await loadTesseraDataForVideo(params.video, currentVideoId)
-
-        // Initialize paywall engine based on the video's monetization mode
-        if (!isVideoOwner()) {
-          // Wait for the paywall bundle to be available (script may still be loading on first visit)
-          const waitForBundle = () => new Promise<void>((resolve) => {
-            if ((window as any).ArcCashier) return resolve()
-            script.addEventListener('load', () => resolve(), { once: true })
-          })
-          await waitForBundle()
-          initPaywallEngine(mode, wallet, tipAmount)
-        }
-
-        // Reset session manager display immediately using the video's rate.
-        // This is done HERE (not in the ping handler) to avoid the 429 race condition:
-        // the first ping after a video change is frequently rate-limited and never
-        // returns ratePerSecond, leaving the old rate stuck on screen.
-        if ((window as any).arcResetVideoSession) {
-          const rateNum = rate ? parseFloat(rate) : null
-          ;(window as any).arcResetVideoSession(rateNum ?? undefined)
-          console.log(`[tessera] arcResetVideoSession called with rate=${rate ?? 'default'}`)
-        }
-        // Keep the flag so the ping handler can also update the rate if it arrives
-        videoJustChanged = true
+        await handleVideoLoaded(params.video)
       }
     }
   })

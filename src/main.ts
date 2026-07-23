@@ -404,7 +404,83 @@ export async function register (options: RegisterServerOptions) {
         if (stored['tessera-tip-amount']) video.pluginData['tessera-tip-amount'] = stored['tessera-tip-amount']
       }
 
+      if (stored['tessera-mode'] === 'pay-per-second') {
+        try {
+          const v = video as Record<string, any>
+          const uuid = v['uuid']
+          const webserverUrl = peertubeHelpers.config.getWebserverUrl()
+          if (webserverUrl && uuid) {
+            v['embedUrl'] = `${webserverUrl}/videos/embed/${uuid}`
+            v['embedPath'] = `/videos/embed/${uuid}`
+
+            const proxyBase = `${webserverUrl}/plugins/peertube-plugin-tessera/router/hls-proxy/${uuid}`
+            if (Array.isArray(v['streamingPlaylists']) && v['streamingPlaylists'].length > 0) {
+              v['streamingPlaylists'] = v['streamingPlaylists'].map((sp: any) => ({
+                ...sp,
+                playlistUrl: `${proxyBase}/master.m3u8`
+              }))
+            }
+            v['files'] = []
+          }
+        } catch {
+          // ignore webserverUrl lookup errors
+        }
+      }
+
       return video
+    }) as () => unknown
+  })
+
+  // Hook: rewrite HLS playlist URL in ActivityPub JSON-LD so federated instances
+  // store our proxy URL instead of the real static HLS URL.
+  // When Instance B's player requests the manifest, it hits our router where
+  // we enforce the 5-second teaser for unauthenticated sessions.
+  registerHook({
+    target: 'filter:activity-pub.video.json-ld.build.result' as any,
+    handler: (async (jsonld: any, params: { video: { id?: number; uuid?: string; pluginData?: Record<string, unknown> } }) => {
+      if (!jsonld || !params?.video?.id || !params?.video?.uuid) return jsonld
+
+      const stored = await loadTesseraVideoData(storageManager, params.video.id, params.video.pluginData)
+      if (stored['tessera-mode'] !== 'pay-per-second') return jsonld
+
+      const webserverUrl = peertubeHelpers.config.getWebserverUrl()
+      if (!webserverUrl) return jsonld
+
+      // peertubeHelpers.plugin.getBaseRouterRoute() returns the correct URL like
+      // '/plugins/tessera/router/' (PeerTube prepends 'peertube-plugin-' internally,
+      // so the URL segment must NOT include the 'peertube-plugin-' prefix).
+      const baseRouterRoute = peertubeHelpers.plugin.getBaseRouterRoute().replace(/\/$/, '')
+      const proxyBase = `${webserverUrl}${baseRouterRoute}/hls-proxy/${params.video.uuid}`
+
+      // For pay-per-second videos, rewrite the HLS playlist URL to our proxy
+      // and strip all direct-playable formats so federated players cannot bypass
+      // the teaser by using MP4/WebM downloads or BitTorrent.
+      // Non-playback URLs (captions, segment hashes, trackers) are preserved.
+      const DIRECT_PLAYABLE_TYPES = new Set([
+        'video/mp4',
+        'video/webm',
+        'video/ogg',
+        'audio/mp4',
+        'application/x-bittorrent',
+        'application/x-bittorrent;x-scheme-handler/magnet',
+      ])
+
+      if (Array.isArray(jsonld.url)) {
+        jsonld.url = jsonld.url
+          // Strip direct-playable files so the player must use HLS
+          .filter((u: any) => !DIRECT_PLAYABLE_TYPES.has(u?.mediaType))
+          // Rewrite HLS playlist URL to our teaser proxy (/manifest?file=...)
+          .map((u: any) => {
+            if (u?.mediaType === 'application/x-mpegURL' && typeof u?.href === 'string') {
+              const filename = u.href.split('/').pop() ?? 'master.m3u8'
+              return { ...u, href: `${proxyBase}/${filename}` }
+            }
+            return u
+          })
+      }
+
+      peertubeHelpers.logger.info(`[tessera] ActivityPub JSON-LD: rewrote HLS URL for video ${params.video.uuid}`)
+      return jsonld
     }) as () => unknown
   })
 
@@ -447,6 +523,170 @@ export async function register (options: RegisterServerOptions) {
       displayFee: parseFloat(displayFeeStr),
       originFee: parseFloat(originFeeStr)
     })
+  })
+
+  // ─── HLS Proxy Routes ──────────────────────────────────────────────────────
+  // Serves HLS manifests for federated/local viewers.
+  // Uses router.get (not router.use) because router.get is empirically confirmed to
+  // reach the handler in PeerTube's plugin router (router.use does not).
+  // Master playlists (#EXT-X-STREAM-INF) → rewrite variant URLs to go through this proxy.
+  // Variant playlists (#EXTINF:) → truncate to HLS_TEASER_SECONDS for non-paying viewers.
+
+  const HLS_TEASER_SECONDS = 5
+
+
+  router.get('/hls-proxy/:videoUuid/:playlistFile', async (req: any, res: any) => {
+    // Set CORS headers immediately for all GET responses
+    res.set('Access-Control-Allow-Origin', '*')
+    res.set('Access-Control-Allow-Methods', 'GET, OPTIONS, HEAD')
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Range, x-tessera-session')
+
+    const videoUuid = req.params.videoUuid as string
+    const playlistFile = req.params.playlistFile as string
+
+    peertubeHelpers.logger.info(`[tessera] HLS proxy request: method=${req.method}, video=${videoUuid}, file=${playlistFile}, path=${req.path}`)
+
+    const webserverUrl = peertubeHelpers.config.getWebserverUrl()
+    if (!webserverUrl) return res.status(500).json({ error: 'Server not configured' })
+
+    const isPaidSession = false
+
+    try {
+      let content: string | null = null
+
+      // Primary: obtain official disk path via PeerTube's native helper and scan directory
+      try {
+        const filesInfo = await peertubeHelpers.videos.getFiles(videoUuid)
+        const hlsInfo = (filesInfo as any)?.hls
+        const baseHlsPath = hlsInfo?.masterPlaylistPath || hlsInfo?.playlistPath
+
+        if (baseHlsPath) {
+          const { promises: fsPromises } = await import('fs')
+          const { dirname, join } = await import('path')
+          const dir = dirname(baseHlsPath)
+          const files = await fsPromises.readdir(dir)
+
+          let matchedFile: string | undefined
+          if (playlistFile.endsWith('master.m3u8') || playlistFile === 'master.m3u8') {
+            matchedFile = files.find(f => f.endsWith('-master.m3u8') || f === 'master.m3u8')
+          } else {
+            matchedFile = files.find(f => f === playlistFile || f.endsWith(playlistFile))
+          }
+
+          if (matchedFile) {
+            content = await fsPromises.readFile(join(dir, matchedFile), 'utf8')
+          }
+        }
+      } catch (fileErr: any) {
+        peertubeHelpers.logger.warn(`[tessera] getFiles lookup failed for ${videoUuid}/${playlistFile}: ${fileErr.message}`)
+      }
+
+      // Fallback A: direct container disk path
+      if (!content) {
+        try {
+          const { promises: fsPromises } = await import('fs')
+          const diskPath = `/data/streaming-playlists/hls/${videoUuid}/${playlistFile}`
+          content = await fsPromises.readFile(diskPath, 'utf8')
+        } catch {
+          // ignore
+        }
+      }
+
+      // Fallback B: HTTP fetch via webserverUrl
+      if (!content) {
+        try {
+          const realUrl = `${webserverUrl}/static/streaming-playlists/hls/${videoUuid}/${playlistFile}`
+          const response = await fetch(realUrl, { signal: AbortSignal.timeout(8000) })
+          if (response.ok) {
+            content = await response.text()
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!content) {
+        peertubeHelpers.logger.error(`[tessera] HLS proxy playlist not found for video ${videoUuid}, file ${playlistFile}`)
+        return res.status(404).end()
+      }
+
+      const baseRouterRoute = peertubeHelpers.plugin.getBaseRouterRoute().replace(/\/$/, '')
+      const proxyBase = `${webserverUrl}${baseRouterRoute}/hls-proxy/${videoUuid}`
+
+      // Case A: Master Playlist (contains variant stream definitions)
+      if (content.includes('#EXT-X-STREAM-INF') || playlistFile.endsWith('master.m3u8')) {
+        const rewritten = content.replace(
+          /^(?!#)([^\s]+\.m3u8.*)$/gm,
+          (line) => `${proxyBase}/${line.trim()}`
+        )
+        res.set('Content-Type', 'application/vnd.apple.mpegurl')
+        res.set('Cache-Control', 'no-cache')
+        return res.send(rewritten)
+      }
+
+      // Case B: Variant Playlist (contains segment .ts / fMP4 files)
+      const staticBase = `${webserverUrl}/static/streaming-playlists/hls/${videoUuid}`
+      const absoluteContent = content
+        .replace(/URI="([^"]+)"/g, (_: string, uri: string) => {
+          if (uri.startsWith('http')) return `URI="${uri}"`
+          return `URI="${staticBase}/${uri}"`
+        })
+        .replace(/^(?!#)([^\s]+\.(?:ts|mp4|m4s).*)$/gm, (seg: string) => {
+          if (seg.trim().startsWith('http')) return seg.trim()
+          return `${staticBase}/${seg.trim()}`
+        })
+
+      if (isPaidSession) {
+        res.set('Content-Type', 'application/vnd.apple.mpegurl')
+        res.set('Cache-Control', 'no-cache')
+        return res.send(absoluteContent)
+      }
+
+      // Teaser: emit segments up to HLS_TEASER_SECONDS then append EXT-X-ENDLIST
+      const lines = absoluteContent.split('\n')
+      const teaserLines: string[] = []
+      let elapsed = 0
+      let i = 0
+      let teaserEnded = false
+
+      while (i < lines.length) {
+        const line = lines[i].trimEnd()
+
+        if (teaserEnded) {
+          i++
+          continue
+        }
+
+        if (line.startsWith('#EXTINF:')) {
+          const segDuration = parseFloat(line.replace('#EXTINF:', '').replace(',', ''))
+          if (elapsed >= HLS_TEASER_SECONDS) {
+            teaserLines.push('#EXT-X-ENDLIST')
+            teaserEnded = true
+            i++
+            continue
+          }
+          teaserLines.push(line)
+          elapsed += segDuration
+        } else if (!line.startsWith('#') && line.trim() !== '' && !line.startsWith('http')) {
+          i++
+          continue
+        } else {
+          teaserLines.push(line)
+        }
+        i++
+      }
+
+      if (!teaserEnded && !teaserLines.includes('#EXT-X-ENDLIST')) {
+        teaserLines.push('#EXT-X-ENDLIST')
+      }
+
+      res.set('Content-Type', 'application/vnd.apple.mpegurl')
+      res.set('Cache-Control', 'no-cache')
+      return res.send(teaserLines.join('\n'))
+    } catch (err: any) {
+      peertubeHelpers.logger.error(`[tessera] HLS proxy error (${videoUuid}/${playlistFile}): ${err.message}`)
+      return res.status(502).end()
+    }
   })
 
   // ─── Browser relay routes ──────────────────────────────────────────────────
