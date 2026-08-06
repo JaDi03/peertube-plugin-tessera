@@ -168,10 +168,17 @@ export async function register (options: RegisterServerOptions) {
       return false
     }
 
-    const timestamp = Date.now()
+    // Tessera flat connector HMAC (verifyConnectorSignature):
+    // headers X-Tessera-Timestamp / X-Tessera-Nonce / X-Tessera-Signature
+    // signature = HMAC-SHA256(secret, `${timestamp}.${nonce}.${rawBody}`)
+    // webhook-secret setting must equal TESSERA_CONNECTOR_SECRET_PEERTUBE on the sidecar.
+    const timestamp = String(Date.now())
     const nonce = crypto.randomBytes(16).toString('hex')
-    const payload = JSON.stringify({ event, timestamp, nonce, ...payloadData })
-    const signature = crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex')
+    const payload = JSON.stringify({ event, timestamp: Number(timestamp), nonce, ...payloadData })
+    const signature = crypto
+      .createHmac('sha256', webhookSecret)
+      .update(`${timestamp}.${nonce}.${payload}`)
+      .digest('hex')
 
     for (let i = 0; i < maxRetries; i++) {
       try {
@@ -182,7 +189,9 @@ export async function register (options: RegisterServerOptions) {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-PeerTube-Signature': signature
+            'X-Tessera-Timestamp': timestamp,
+            'X-Tessera-Nonce': nonce,
+            'X-Tessera-Signature': signature
           },
           body: payload,
           signal: controller.signal
@@ -259,7 +268,7 @@ export async function register (options: RegisterServerOptions) {
     name: 'webhook-secret',
     label: 'Tessera Webhook Secret',
     type: 'input',
-    descriptionHTML: 'The secret used to sign HMAC SHA-256 requests',
+    descriptionHTML: 'Must match the sidecar env <code>TESSERA_CONNECTOR_SECRET_PEERTUBE</code>. Used for Tessera HMAC headers (X-Tessera-Timestamp / Nonce / Signature) and admin Bearer auth.',
     default: '',
     private: true
   })
@@ -927,6 +936,7 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
+      // Stats remain on the PeerTube connector; balance/withdraw live under /api/core/creator/*
       const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/stats?address=${encodeURIComponent(address)}`)
       const data = await response.json()
       return res.status(response.status).json(data)
@@ -946,7 +956,7 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/balance?address=${encodeURIComponent(address)}`)
+      const response = await fetch(`${baseUrl}/api/core/creator/balance?address=${encodeURIComponent(address)}`)
       const data = await response.json()
       return res.status(response.status).json(data)
     } catch (err: any) {
@@ -960,7 +970,7 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/prepare-withdraw`, {
+      const response = await fetch(`${baseUrl}/api/core/creator/prepare-withdraw`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req.body)
@@ -978,7 +988,7 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/complete-withdraw`, {
+      const response = await fetch(`${baseUrl}/api/core/creator/complete-withdraw`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req.body)
