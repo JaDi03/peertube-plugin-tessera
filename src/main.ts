@@ -558,11 +558,9 @@ export async function register (options: RegisterServerOptions) {
       const webserverUrl = peertubeHelpers.config.getWebserverUrl()
       if (!webserverUrl) return jsonld
 
-      // peertubeHelpers.plugin.getBaseRouterRoute() returns the correct URL like
-      // '/plugins/tessera/router/' (PeerTube prepends 'peertube-plugin-' internally,
-      // so the URL segment must NOT include the 'peertube-plugin-' prefix).
-      const baseRouterRoute = peertubeHelpers.plugin.getBaseRouterRoute().replace(/\/$/, '')
-      const proxyBase = `${webserverUrl}${baseRouterRoute}/hls-proxy/${params.video.uuid}`
+      // Always publish the unversioned router path. Versioned URLs (…/tessera/1.1.TIMESTAMP/…)
+      // break federation after every plugin update (B keeps the old URL → 404).
+      const proxyBase = `${webserverUrl.replace(/\/$/, '')}/plugins/tessera/router/hls-proxy/${params.video.uuid}`
 
       // For pay-per-second videos, rewrite the HLS playlist URL to our proxy
       // and strip all direct-playable formats so federated players cannot bypass
