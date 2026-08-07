@@ -104,6 +104,112 @@ function validateTesseraWallet (pluginData: unknown): string | null {
   return null
 }
 
+/** Locality for federation: where the video was published vs where the viewer watches. */
+function resolveVideoLocality (
+  video: { isLocal?: boolean; url?: string } | null | undefined,
+  localWebserverUrl: string
+): { isLocal: boolean, originInstanceUrl: string } {
+  const isLocal = video?.isLocal !== false
+  let originInstanceUrl = localWebserverUrl
+  if (!isLocal && video?.url) {
+    try {
+      originInstanceUrl = new URL(video.url).origin
+    } catch {
+      // Keep local webserver URL as fallback
+    }
+  }
+  return { isLocal, originInstanceUrl }
+}
+
+async function resolveRemotePluginRouterBase (originInstanceUrl: string): Promise<string | null> {
+  try {
+    const pluginInfoRes = await fetch(
+      `${originInstanceUrl}/api/v1/plugins/peertube-plugin-tessera`,
+      { signal: AbortSignal.timeout(3000) }
+    )
+    if (!pluginInfoRes.ok) return null
+
+    const pluginInfo = await pluginInfoRes.json() as { plugin?: { version?: string }, version?: string }
+    const version = pluginInfo?.plugin?.version ?? pluginInfo?.version
+    if (!version) return null
+
+    return `${originInstanceUrl}/plugins/peertube-plugin-tessera/${version}/router`
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Federated videos do not carry tessera-* pluginData over ActivityPub.
+ * Fetch monetization fields from the origin instance Tessera plugin.
+ */
+async function fetchRemoteTesseraData (
+  originInstanceUrl: string,
+  videoUuid: string
+): Promise<TesseraPluginData | null> {
+  const routerBase = await resolveRemotePluginRouterBase(originInstanceUrl)
+  if (!routerBase) return null
+
+  try {
+    const res = await fetch(
+      `${routerBase}/video/${encodeURIComponent(videoUuid)}/tessera-data`,
+      { signal: AbortSignal.timeout(5000) }
+    )
+    if (!res.ok) return null
+
+    const data = await res.json() as {
+      wallet?: string | null
+      mode?: string | null
+      rate?: string | null
+      tipAmount?: string | null
+    }
+
+    return {
+      'tessera-wallet': data.wallet || undefined,
+      'tessera-mode': data.mode || undefined,
+      'tessera-rate': data.rate || undefined,
+      'tessera-tip-amount': data.tipAmount || undefined,
+    }
+  } catch {
+    return null
+  }
+}
+
+async function resolveTesseraMonetizationForVideo (
+  storageManager: { getData: <T = unknown>(key: string) => Promise<T | undefined> },
+  video: { id?: number; uuid?: string; isLocal?: boolean; url?: string; pluginData?: unknown },
+  localWebserverUrl: string
+): Promise<{ data: TesseraPluginData, isLocal: boolean, originInstanceUrl: string }> {
+  const { isLocal, originInstanceUrl } = resolveVideoLocality(video, localWebserverUrl)
+  let data: TesseraPluginData = {}
+
+  if (video.id) {
+    data = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
+  } else {
+    data = extractTesseraPluginData(video.pluginData)
+  }
+
+  const needsRemoteLookup = !isLocal && (
+    !data['tessera-wallet'] ||
+    !data['tessera-mode'] ||
+    !data['tessera-rate']
+  )
+
+  if (needsRemoteLookup && video.uuid && originInstanceUrl !== localWebserverUrl) {
+    const remote = await fetchRemoteTesseraData(originInstanceUrl, video.uuid)
+    if (remote) {
+      data = {
+        'tessera-wallet': data['tessera-wallet'] || remote['tessera-wallet'],
+        'tessera-mode': data['tessera-mode'] || remote['tessera-mode'],
+        'tessera-rate': data['tessera-rate'] || remote['tessera-rate'],
+        'tessera-tip-amount': data['tessera-tip-amount'] || remote['tessera-tip-amount'],
+      }
+    }
+  }
+
+  return { data, isLocal, originInstanceUrl }
+}
+
 interface ViewerSession {
   expireTime: number
   lastAccessTime: number
@@ -793,15 +899,29 @@ export async function register (options: RegisterServerOptions) {
   router.get('/video/:id/tessera-data', async (req: any, res: any) => {
     const videoId = req.params.id
     try {
-      const video = await loadVideoWithFallback(videoId) as { id?: number; pluginData?: unknown }
+      const video = await loadVideoWithFallback(videoId) as {
+        id?: number
+        uuid?: string
+        isLocal?: boolean
+        url?: string
+        pluginData?: unknown
+      }
       if (!video?.id) return res.status(404).json({ error: 'Video not found' })
 
-      const data = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
+      const localWebserverUrl = peertubeHelpers.config.getWebserverUrl()
+      const { data, isLocal, originInstanceUrl } = await resolveTesseraMonetizationForVideo(
+        storageManager,
+        video,
+        localWebserverUrl
+      )
+
       res.json({
         wallet: data['tessera-wallet'] || null,
         mode: data['tessera-mode'] || null,
         rate: data['tessera-rate'] || null,
         tipAmount: data['tessera-tip-amount'] || null,
+        isLocal,
+        originInstanceUrl,
       })
     } catch (err) {
       peertubeHelpers.logger.warn(`[tessera] Error fetching video data for ${videoId}: ${err}`)
@@ -1042,14 +1162,6 @@ export async function register (options: RegisterServerOptions) {
       if (video) {
         if (video.uuid) videoUuid = video.uuid
         if (video.name) videoName = video.name
-        isLocal = video.isLocal !== false
-        if (!isLocal && video.url) {
-          try {
-            originInstanceUrl = new URL(video.url).origin
-          } catch {
-            // Keep local fallback
-          }
-        }
         if (video.VideoChannel) {
           channelId = video.VideoChannel.name || video.VideoChannel.id.toString()
           channelName = video.VideoChannel.displayName || channelId
@@ -1060,11 +1172,23 @@ export async function register (options: RegisterServerOptions) {
         if (video.Account) {
           accountName = video.Account.name || video.Account.displayName || ''
         }
-        if (video.id) {
-          const myData = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
-          if (myData['tessera-mode']) tesseraMode = myData['tessera-mode']
-          if (myData['tessera-rate']) tesseraRate = myData['tessera-rate']
-          if (myData['tessera-wallet']) tesseraWallet = myData['tessera-wallet']
+
+        const resolved = await resolveTesseraMonetizationForVideo(
+          storageManager,
+          video,
+          peertubeHelpers.config.getWebserverUrl()
+        )
+        isLocal = resolved.isLocal
+        originInstanceUrl = resolved.originInstanceUrl
+        if (resolved.data['tessera-mode']) tesseraMode = resolved.data['tessera-mode']
+        if (resolved.data['tessera-rate']) tesseraRate = resolved.data['tessera-rate']
+        if (resolved.data['tessera-wallet']) tesseraWallet = resolved.data['tessera-wallet']
+
+        if (!isLocal) {
+          peertubeHelpers.logger.info(
+            `[tessera] Federated ping video=${videoUuid} origin=${originInstanceUrl} ` +
+            `wallet=${tesseraWallet ? 'ok' : 'missing'} mode=${tesseraMode}`
+          )
         }
       }
     } catch {
