@@ -873,24 +873,28 @@ export async function register (options: RegisterServerOptions) {
     }
   })
 
-  // Relay: expose sidecar instance-info through PeerTube's plugin URL for federation discovery.
-  // Remote PeerTube servers can query:
+  // Federation discovery: return PeerTube plugin dashboard settings (source of truth).
+  // Remote instances query:
   //   GET https://peertube.remote.com/plugins/peertube-plugin-tessera/{version}/router/instance-info
-  // to obtain the admin wallet and fee configuration of the origin instance,
-  // without needing the sidecar to have a public URL.
-  router.get('/instance-info', async (req: any, res: any) => {
-    const internalUrl = await getBaseUrl()
-    if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
-    try {
-      const response = await fetch(`${internalUrl}/api/tessera/instance-info`, {
-        signal: AbortSignal.timeout(5000)
+  // Do not relay to the sidecar instance-settings.json placeholder.
+  router.get('/instance-info', async (_req: any, res: any) => {
+    const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
+    const displayFeeStr = (await settingsManager.getSetting('tessera-display-fee') as string) || '0.10'
+    const originFeeStr = (await settingsManager.getSetting('tessera-origin-fee') as string) || '0.10'
+
+    if (!adminWallet) {
+      return res.status(503).json({
+        error: 'Tessera not fully configured: Admin wallet address is missing. Configure it in the PeerTube plugin settings UI.',
+        tesseraVersion: '1.2.0',
       })
-      const data = await response.json()
-      return res.status(response.status).json(data)
-    } catch (err: any) {
-      peertubeHelpers.logger.error(`[tessera] instance-info relay error: ${err.message}`)
-      return res.status(502).json({ error: 'Could not reach Tessera sidecar' })
     }
+
+    return res.json({
+      adminWallet,
+      displayFee: parseFloat(displayFeeStr),
+      originFee: parseFloat(originFeeStr),
+      tesseraVersion: '1.2.0',
+    })
   })
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -947,12 +951,20 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
+      const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
+      if (!adminWallet) {
+        return res.status(400).json({ error: 'Admin wallet address is not configured or invalid' })
+      }
+
       const secret = await settingsManager.getSetting('webhook-secret') as string
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/balance`, {
-        headers: {
-          'Authorization': `Bearer ${secret}`
+      const response = await fetch(
+        `${baseUrl}/api/connectors/peertube/admin/balance?address=${encodeURIComponent(adminWallet)}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${secret}`
+          }
         }
-      })
+      )
       const data = await response.json()
       return res.status(response.status).json(data)
     } catch (err: any) {
@@ -972,13 +984,19 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
+      const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
+      if (!adminWallet) {
+        return res.status(400).json({ error: 'Admin wallet address is not configured or invalid' })
+      }
+
       const secret = await settingsManager.getSetting('webhook-secret') as string
       const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/prepare-withdraw`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${secret}`
-        }
+        },
+        body: JSON.stringify({ address: adminWallet })
       })
       const data = await response.json()
       return res.status(response.status).json(data)
@@ -999,6 +1017,11 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
+      const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
+      if (!adminWallet) {
+        return res.status(400).json({ error: 'Admin wallet address is not configured or invalid' })
+      }
+
       const secret = await settingsManager.getSetting('webhook-secret') as string
       const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/complete-withdraw`, {
         method: 'POST',
@@ -1006,7 +1029,7 @@ export async function register (options: RegisterServerOptions) {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${secret}`
         },
-        body: JSON.stringify(req.body)
+        body: JSON.stringify({ ...req.body, address: adminWallet })
       })
       const data = await response.json()
       return res.status(response.status).json(data)
@@ -1027,8 +1050,10 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
+      const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
       const secret = await settingsManager.getSetting('webhook-secret') as string
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/stats`, {
+      const qs = adminWallet ? `?address=${encodeURIComponent(adminWallet)}` : ''
+      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/stats${qs}`, {
         headers: {
           'Authorization': `Bearer ${secret}`
         }
