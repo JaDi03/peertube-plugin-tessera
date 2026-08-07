@@ -9,6 +9,7 @@ interface TesseraPluginData {
   'tessera-rate'?: string
   'tessera-wallet'?: string
   'tessera-tip-amount'?: string
+  'tessera-full-playlist-url'?: string
 }
 
 function extractTesseraPluginData (pluginData: unknown): TesseraPluginData {
@@ -137,6 +138,39 @@ async function resolveRemotePluginRouterBase (originInstanceUrl: string): Promis
 }
 
 /**
+ * Public full HLS master URL on this instance (not the truncating teaser proxy).
+ * Used by display instances that run Tessera so they can unlock the complete stream.
+ */
+async function resolveFullHlsMasterUrl (
+  peertubeHelpers: RegisterServerOptions['peertubeHelpers'],
+  videoUuid: string,
+  webserverUrl: string
+): Promise<string | null> {
+  const base = webserverUrl.replace(/\/$/, '')
+  try {
+    const filesInfo = await peertubeHelpers.videos.getFiles(videoUuid)
+    const hlsInfo = (filesInfo as any)?.hls
+    if (typeof hlsInfo?.playlistUrl === 'string' && hlsInfo.playlistUrl.startsWith('http')) {
+      return hlsInfo.playlistUrl
+    }
+    const baseHlsPath = hlsInfo?.masterPlaylistPath || hlsInfo?.playlistPath
+    if (baseHlsPath) {
+      const { promises: fsPromises } = await import('fs')
+      const { dirname } = await import('path')
+      const dir = dirname(baseHlsPath)
+      const files = await fsPromises.readdir(dir)
+      const master = files.find((f) => f.endsWith('-master.m3u8') || f === 'master.m3u8')
+      if (master) {
+        return `${base}/static/streaming-playlists/hls/${videoUuid}/${master}`
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return `${base}/static/streaming-playlists/hls/${videoUuid}/${videoUuid}-master.m3u8`
+}
+
+/**
  * Federated videos do not carry tessera-* pluginData over ActivityPub.
  * Fetch monetization fields from the origin instance Tessera plugin.
  */
@@ -159,6 +193,7 @@ async function fetchRemoteTesseraData (
       mode?: string | null
       rate?: string | null
       tipAmount?: string | null
+      fullPlaylistUrl?: string | null
     }
 
     return {
@@ -166,6 +201,7 @@ async function fetchRemoteTesseraData (
       'tessera-mode': data.mode || undefined,
       'tessera-rate': data.rate || undefined,
       'tessera-tip-amount': data.tipAmount || undefined,
+      'tessera-full-playlist-url': data.fullPlaylistUrl || undefined,
     }
   } catch {
     return null
@@ -189,7 +225,8 @@ async function resolveTesseraMonetizationForVideo (
   const needsRemoteLookup = !isLocal && (
     !data['tessera-wallet'] ||
     !data['tessera-mode'] ||
-    !data['tessera-rate']
+    !data['tessera-rate'] ||
+    !data['tessera-full-playlist-url']
   )
 
   if (needsRemoteLookup && video.uuid && originInstanceUrl !== localWebserverUrl) {
@@ -200,6 +237,7 @@ async function resolveTesseraMonetizationForVideo (
         'tessera-mode': data['tessera-mode'] || remote['tessera-mode'],
         'tessera-rate': data['tessera-rate'] || remote['tessera-rate'],
         'tessera-tip-amount': data['tessera-tip-amount'] || remote['tessera-tip-amount'],
+        'tessera-full-playlist-url': data['tessera-full-playlist-url'] || remote['tessera-full-playlist-url'],
       }
     }
   }
@@ -499,7 +537,7 @@ export async function register (options: RegisterServerOptions) {
 
   registerHook({
     target: 'filter:api.video.get.result',
-    handler: (async (video: { id?: number; pluginData?: Record<string, unknown> }) => {
+    handler: (async (video: { id?: number; uuid?: string; isLocal?: boolean; url?: string; pluginData?: Record<string, unknown> }) => {
       if (!video?.id) return video
 
       const fromApi = extractTesseraPluginData(video.pluginData)
@@ -516,37 +554,41 @@ export async function register (options: RegisterServerOptions) {
         if (stored['tessera-tip-amount']) video.pluginData['tessera-tip-amount'] = stored['tessera-tip-amount']
       }
 
-      if (stored['tessera-mode'] === 'pay-per-second') {
-        try {
-          const v = video as Record<string, any>
-          const uuid = v['uuid']
-          const webserverUrl = peertubeHelpers.config.getWebserverUrl()
-          if (webserverUrl && uuid) {
-            v['embedUrl'] = `${webserverUrl}/videos/embed/${uuid}`
-            v['embedPath'] = `/videos/embed/${uuid}`
+      // Local PPS: keep full HLS; paywall locks in the client (do not force teaser proxy).
+      // Remote PPS on a Tessera instance: swap federated teaser URL → origin fullPlaylistUrl.
+      try {
+        const webserverUrl = peertubeHelpers.config.getWebserverUrl()
+        if (!webserverUrl) return video
 
-            const proxyBase = `${webserverUrl}/plugins/peertube-plugin-tessera/router/hls-proxy/${uuid}`
-            if (Array.isArray(v['streamingPlaylists']) && v['streamingPlaylists'].length > 0) {
-              v['streamingPlaylists'] = v['streamingPlaylists'].map((sp: any) => ({
-                ...sp,
-                playlistUrl: `${proxyBase}/master.m3u8`
-              }))
-            }
-            v['files'] = []
-          }
-        } catch {
-          // ignore webserverUrl lookup errors
+        const { data, isLocal } = await resolveTesseraMonetizationForVideo(
+          storageManager,
+          video,
+          webserverUrl
+        )
+        if (data['tessera-mode'] !== 'pay-per-second') return video
+        if (isLocal) return video
+
+        const fullPlaylistUrl = data['tessera-full-playlist-url']
+        if (!fullPlaylistUrl) return video
+
+        const v = video as Record<string, any>
+        if (Array.isArray(v['streamingPlaylists']) && v['streamingPlaylists'].length > 0) {
+          v['streamingPlaylists'] = v['streamingPlaylists'].map((sp: any) => ({
+            ...sp,
+            playlistUrl: fullPlaylistUrl
+          }))
         }
+        v['files'] = []
+      } catch {
+        // ignore locality / remote lookup errors
       }
 
       return video
     }) as () => unknown
   })
 
-  // Hook: rewrite HLS playlist URL in ActivityPub JSON-LD so federated instances
-  // store our proxy URL instead of the real static HLS URL.
-  // When Instance B's player requests the manifest, it hits our router where
-  // we enforce the 5-second teaser for unauthenticated sessions.
+  // Federate truncating teaser HLS so instances WITHOUT Tessera only get ~5s.
+  // Instances WITH Tessera swap to fullPlaylistUrl via filter:api.video.get.result.
   registerHook({
     target: 'filter:activity-pub.video.json-ld.build.result' as any,
     handler: (async (jsonld: any, params: { video: { id?: number; uuid?: string; pluginData?: Record<string, unknown> } }) => {
@@ -562,10 +604,7 @@ export async function register (options: RegisterServerOptions) {
       // break federation after every plugin update (B keeps the old URL → 404).
       const proxyBase = `${webserverUrl.replace(/\/$/, '')}/plugins/tessera/router/hls-proxy/${params.video.uuid}`
 
-      // For pay-per-second videos, rewrite the HLS playlist URL to our proxy
-      // and strip all direct-playable formats so federated players cannot bypass
-      // the teaser by using MP4/WebM downloads or BitTorrent.
-      // Non-playback URLs (captions, segment hashes, trackers) are preserved.
+      // Strip direct-playable formats so federated players cannot bypass the teaser.
       const DIRECT_PLAYABLE_TYPES = new Set([
         'video/mp4',
         'video/webm',
@@ -577,9 +616,7 @@ export async function register (options: RegisterServerOptions) {
 
       if (Array.isArray(jsonld.url)) {
         jsonld.url = jsonld.url
-          // Strip direct-playable files so the player must use HLS
           .filter((u: any) => !DIRECT_PLAYABLE_TYPES.has(u?.mediaType))
-          // Rewrite HLS playlist URL to our teaser proxy (/manifest?file=...)
           .map((u: any) => {
             if (u?.mediaType === 'application/x-mpegURL' && typeof u?.href === 'string') {
               const filename = u.href.split('/').pop() ?? 'master.m3u8'
@@ -589,7 +626,7 @@ export async function register (options: RegisterServerOptions) {
           })
       }
 
-      peertubeHelpers.logger.info(`[tessera] ActivityPub JSON-LD: rewrote HLS URL for video ${params.video.uuid}`)
+      peertubeHelpers.logger.info(`[tessera] ActivityPub JSON-LD: rewrote HLS to teaser proxy for video ${params.video.uuid}`)
       return jsonld
     }) as () => unknown
   })
@@ -680,7 +717,7 @@ export async function register (options: RegisterServerOptions) {
     const webserverUrl = peertubeHelpers.config.getWebserverUrl()
     if (!webserverUrl) return res.status(500).json({ error: 'Server not configured' })
 
-    const isPaidSession = false
+      const isPaidSession = false
 
     try {
       let content: string | null = null
@@ -935,11 +972,17 @@ export async function register (options: RegisterServerOptions) {
         localWebserverUrl
       )
 
+      let fullPlaylistUrl: string | null = data['tessera-full-playlist-url'] || null
+      if (isLocal && data['tessera-mode'] === 'pay-per-second' && video.uuid) {
+        fullPlaylistUrl = await resolveFullHlsMasterUrl(peertubeHelpers, video.uuid, localWebserverUrl)
+      }
+
       res.json({
         wallet: data['tessera-wallet'] || null,
         mode: data['tessera-mode'] || null,
         rate: data['tessera-rate'] || null,
         tipAmount: data['tessera-tip-amount'] || null,
+        fullPlaylistUrl,
         isLocal,
         originInstanceUrl,
       })

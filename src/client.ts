@@ -930,15 +930,22 @@ export async function register (options: RegisterClientOptions) {
       return
     }
 
-    // Local pay-per-second: paywall on this instance.
-    if (arcCashier && isLocal) {
-      console.log('[tessera] Monetized local video (isLocal: true). Setting up paywall only.')
+    // Pay-per-second: same deposit paywall on local and federated when Tessera is present.
+    // Federated teaser (~5s) is for instances WITHOUT Tessera (AP hls-proxy). With Tessera,
+    // the API swaps to origin fullPlaylistUrl and lock is UI/billing.
+    if (arcCashier) {
+      console.log(
+        isLocal
+          ? '[tessera] Monetized local video (isLocal: true). Setting up paywall only.'
+          : '[tessera] Monetized federated video (isLocal: false). Paywall on this instance (full stream via fullPlaylistUrl).'
+      )
       arcCashier.initPaywall(targetContainer)
+      return
     }
 
-    // Federated pay-per-second only: 5s teaser then redirect to origin.
+    // No paywall bundle: federated PPS gets a 5s client teaser + link to origin.
     if (!isLocal) {
-        console.log('[tessera] Monetized federated video (isLocal: false). Setting up origin teaser.')
+        console.log('[tessera] Monetized federated video without ArcCashier. Setting up origin teaser.')
         const TEASER_PREVIEW_LIMIT_SECONDS = 5
 
         const showTeaserOverlay = () => {
