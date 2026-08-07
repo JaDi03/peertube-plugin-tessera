@@ -741,8 +741,8 @@ export async function register (options: RegisterServerOptions) {
         return res.status(404).end()
       }
 
-      const baseRouterRoute = peertubeHelpers.plugin.getBaseRouterRoute().replace(/\/$/, '')
-      const proxyBase = `${webserverUrl}${baseRouterRoute}/hls-proxy/${videoUuid}`
+      // Always unversioned: versioned variant URLs 404 after plugin updates (black screen on B).
+      const proxyBase = `${webserverUrl.replace(/\/$/, '')}/plugins/tessera/router/hls-proxy/${videoUuid}`
 
       // Case A: Master Playlist (contains variant stream definitions)
       if (content.includes('#EXT-X-STREAM-INF') || playlistFile.endsWith('master.m3u8')) {

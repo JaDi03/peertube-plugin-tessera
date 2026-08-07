@@ -907,7 +907,6 @@ export async function register (options: RegisterClientOptions) {
     if (paywallInitialized) return
 
     // If a LOCAL video has no wallet address and is not explicitly free, bypass.
-    // Remote/federated videos (!isLocal) must NEVER be bypassed because they are monetized at origin.
     if (isLocal && !wallet && mode !== 'free') {
       console.log('[tessera] Local video is unmonetized (no wallet address set). Bypassing paywall.')
       document.body.classList.remove('arc-locked')
@@ -919,18 +918,26 @@ export async function register (options: RegisterClientOptions) {
     const arcCashier = (window as any).ArcCashier
     const targetContainer = currentPlayerElement || document.querySelector('.peertube-player-container, .video-js, video-player')
 
-    if (mode === 'free' && isLocal) {
-      console.log('[tessera] Free video detected. Calling ArcCashier.initTipMode()')
+    // Free (local or federated): full watch + tips. Never show origin teaser.
+    if (mode === 'free') {
+      console.log(
+        isLocal
+          ? '[tessera] Free video detected. Calling ArcCashier.initTipMode()'
+          : '[tessera] Free federated video (isLocal: false). Tips only, no origin teaser.'
+      )
       document.body.classList.remove('arc-locked')
       if (arcCashier) arcCashier.initTipMode(wallet || '', tipAmount || '0.10')
-    } else {
-      // Local origin (A): paywall only. Origin-redirect teaser is for federated viewers on B.
-      if (arcCashier && isLocal) {
-        console.log('[tessera] Monetized local video (isLocal: true). Setting up paywall only.')
-        arcCashier.initPaywall(targetContainer)
-      }
+      return
+    }
 
-      if (!isLocal) {
+    // Local pay-per-second: paywall on this instance.
+    if (arcCashier && isLocal) {
+      console.log('[tessera] Monetized local video (isLocal: true). Setting up paywall only.')
+      arcCashier.initPaywall(targetContainer)
+    }
+
+    // Federated pay-per-second only: 5s teaser then redirect to origin.
+    if (!isLocal) {
         console.log('[tessera] Monetized federated video (isLocal: false). Setting up origin teaser.')
         const TEASER_PREVIEW_LIMIT_SECONDS = 5
 
@@ -1005,7 +1012,6 @@ export async function register (options: RegisterClientOptions) {
         }
 
         observeVideoElement()
-      }
     }
   }
 
