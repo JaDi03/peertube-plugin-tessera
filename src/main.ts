@@ -109,34 +109,31 @@ function resolveVideoLocality (
   video: { isLocal?: boolean; url?: string } | null | undefined,
   localWebserverUrl: string
 ): { isLocal: boolean, originInstanceUrl: string } {
-  const isLocal = video?.isLocal !== false
   let originInstanceUrl = localWebserverUrl
-  if (!isLocal && video?.url) {
+  let isLocal = true
+
+  // Prefer canonical video.url origin over video.isLocal.
+  // PeerTube helpers sometimes omit isLocal; `isLocal !== false` then wrongly marks remotes as local.
+  if (video?.url) {
     try {
-      originInstanceUrl = new URL(video.url).origin
+      const videoOrigin = new URL(video.url).origin
+      const localOrigin = new URL(localWebserverUrl).origin
+      isLocal = videoOrigin === localOrigin
+      if (!isLocal) originInstanceUrl = videoOrigin
     } catch {
-      // Keep local webserver URL as fallback
+      if (typeof video.isLocal === 'boolean') isLocal = video.isLocal
     }
+  } else if (typeof video?.isLocal === 'boolean') {
+    isLocal = video.isLocal
   }
+
   return { isLocal, originInstanceUrl }
 }
 
 async function resolveRemotePluginRouterBase (originInstanceUrl: string): Promise<string | null> {
-  try {
-    const pluginInfoRes = await fetch(
-      `${originInstanceUrl}/api/v1/plugins/peertube-plugin-tessera`,
-      { signal: AbortSignal.timeout(3000) }
-    )
-    if (!pluginInfoRes.ok) return null
-
-    const pluginInfo = await pluginInfoRes.json() as { plugin?: { version?: string }, version?: string }
-    const version = pluginInfo?.plugin?.version ?? pluginInfo?.version
-    if (!version) return null
-
-    return `${originInstanceUrl}/plugins/peertube-plugin-tessera/${version}/router`
-  } catch {
-    return null
-  }
+  const base = originInstanceUrl.replace(/\/$/, '')
+  // Unversioned short name is public (no admin token). Versioned peertube-plugin-* API often 401s.
+  return `${base}/plugins/tessera/router`
 }
 
 /**
@@ -603,21 +600,42 @@ export async function register (options: RegisterServerOptions) {
   const router = getRouter()
 
   const loadVideoWithFallback = async (idOrUuid: string): Promise<any> => {
+    let video: any = null
     try {
-      return await peertubeHelpers.videos.loadByIdOrUUID(idOrUuid)
+      video = await peertubeHelpers.videos.loadByIdOrUUID(idOrUuid)
     } catch (err) {
       try {
         const localUrl = peertubeHelpers.config.getWebserverUrl()
         const apiRes = await fetch(`${localUrl}/api/v1/videos/${encodeURIComponent(idOrUuid)}`)
         if (apiRes.ok) {
-          const video = await apiRes.json()
-          return video
+          video = await apiRes.json()
         }
       } catch (fallbackErr) {
         peertubeHelpers.logger.warn(`[tessera] Local API fallback failed for ${idOrUuid}: ${fallbackErr}`)
       }
-      throw err
+      if (!video) throw err
     }
+
+    // Helpers sometimes omit isLocal/url that the public API exposes for remotes.
+    if (video && (typeof video.isLocal !== 'boolean' || !video.url)) {
+      try {
+        const localUrl = peertubeHelpers.config.getWebserverUrl()
+        const apiRes = await fetch(`${localUrl}/api/v1/videos/${encodeURIComponent(idOrUuid)}`, {
+          signal: AbortSignal.timeout(5000)
+        })
+        if (apiRes.ok) {
+          const apiVideo = await apiRes.json() as { isLocal?: boolean; url?: string }
+          if (typeof video.isLocal !== 'boolean' && typeof apiVideo.isLocal === 'boolean') {
+            video.isLocal = apiVideo.isLocal
+          }
+          if (!video.url && apiVideo.url) video.url = apiVideo.url
+        }
+      } catch (enrichErr) {
+        peertubeHelpers.logger.warn(`[tessera] Video locality enrich failed for ${idOrUuid}: ${enrichErr}`)
+      }
+    }
+
+    return video
   }
 
   // Endpoint for the client script to retrieve the base URL and current instance fees
