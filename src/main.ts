@@ -4,6 +4,14 @@ import { RegisterServerOptions } from '@peertube/peertube-types'
 const TIMEOUT_MS = 30000
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
 
+/** Paywall session ids from arc_cashier_user_id (email OTP / Google social; legacy arc_ kept). */
+function isValidPaywallSessionId (sessionId: unknown): sessionId is string {
+  if (typeof sessionId !== 'string' || !sessionId) return false
+  return sessionId.startsWith('email:')
+    || sessionId.startsWith('social:')
+    || sessionId.startsWith('arc_')
+}
+
 interface TesseraPluginData {
   'tessera-mode'?: string
   'tessera-rate'?: string
@@ -1221,8 +1229,9 @@ export async function register (options: RegisterServerOptions) {
     if (action !== 'start' && action !== 'stop' && action !== 'ping') {
        return res.status(400).json({ error: 'Invalid action' })
     }
-    // sessionId is set by paywall.js in the browser's localStorage (arc_cashier_user_id)
-    if (typeof sessionId !== 'string' || !sessionId || !sessionId.startsWith('arc_')) {
+    // sessionId is set by paywall.js in localStorage (arc_cashier_user_id):
+    // email:<addr>, social:<providerId>, or legacy arc_<id>
+    if (!isValidPaywallSessionId(sessionId)) {
        return res.status(400).json({ error: 'Missing or invalid sessionId' })
     }
 
