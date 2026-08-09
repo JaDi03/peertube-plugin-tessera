@@ -203,6 +203,143 @@ export async function register (options: RegisterClientOptions) {
   // Prevents double-initialization when the hook fires multiple times.
   let paywallInitialized = false
 
+  const EARLY_COVER_ID = 'tessera-early-cover'
+  // PeerTube-only: Tessera core mounts the overlay on document.body (fullscreen) so
+  // Jellyfin OSD clicks work. Here we reparent into the player so gallery/nav stay usable.
+  let containedOverlayObserver: MutationObserver | null = null
+  let bodyOverlayWatcher: MutationObserver | null = null
+
+  const resolvePlayerHost = (preferred?: Element | null): HTMLElement | null => {
+    const candidates = [
+      preferred,
+      currentPlayerElement,
+      document.querySelector('.video-wrapper'),
+      document.querySelector('.peertube-player-container'),
+      document.querySelector('.video-js'),
+      document.querySelector('video-player'),
+    ]
+    for (const c of candidates) {
+      if (c instanceof HTMLElement && c !== document.body) return c
+    }
+    return null
+  }
+
+  const stopContainedOverlayWatch = () => {
+    if (containedOverlayObserver) {
+      containedOverlayObserver.disconnect()
+      containedOverlayObserver = null
+    }
+    if (bodyOverlayWatcher) {
+      bodyOverlayWatcher.disconnect()
+      bodyOverlayWatcher = null
+    }
+  }
+
+  /**
+   * Moves Tessera fullscreen overlays into the PeerTube player box.
+   * Uses core CSS class arc-contained-overlay (absolute inset over the host).
+   */
+  const constrainTesseraOverlaysToPlayer = (preferredHost?: Element | null) => {
+    const host = resolvePlayerHost(preferredHost)
+    if (!host) return
+
+    try {
+      if (window.getComputedStyle(host).position === 'static') {
+        host.style.position = 'relative'
+      }
+    } catch { /* ignore */ }
+
+    const placeInHost = (el: HTMLElement | null) => {
+      if (!el) return
+      if (el.id === 'arc-paywall-overlay') {
+        el.classList.add('arc-contained-overlay')
+        // Clear any inline fullscreen sizing left from body mount.
+        el.style.position = ''
+        el.style.inset = ''
+        el.style.width = ''
+        el.style.height = ''
+        el.style.top = ''
+        el.style.left = ''
+      } else {
+        // Early cover / social splash: absolute fill of the player only.
+        el.style.position = 'absolute'
+        el.style.inset = '0'
+        el.style.width = '100%'
+        el.style.height = '100%'
+        el.style.zIndex = '2147483646'
+      }
+      if (el.parentElement !== host) host.appendChild(el)
+      if (host.lastElementChild !== el) host.appendChild(el)
+    }
+
+    placeInHost(document.getElementById('arc-paywall-overlay'))
+    placeInHost(document.getElementById(EARLY_COVER_ID))
+    placeInHost(document.getElementById('arc-social-resume-splash'))
+
+    const keepOnTop = () => {
+      const overlay = document.getElementById('arc-paywall-overlay')
+      if (!overlay || !overlay.isConnected) return
+      placeInHost(overlay)
+    }
+
+    if (containedOverlayObserver) containedOverlayObserver.disconnect()
+    containedOverlayObserver = new MutationObserver(keepOnTop)
+    containedOverlayObserver.observe(host, { childList: true })
+
+    // Core may recreate the overlay on body (e.g. re-init). Catch and reparent.
+    if (bodyOverlayWatcher) bodyOverlayWatcher.disconnect()
+    bodyOverlayWatcher = new MutationObserver(() => {
+      const overlay = document.getElementById('arc-paywall-overlay')
+      if (overlay && overlay.parentElement !== host) placeInHost(overlay)
+      const splash = document.getElementById('arc-social-resume-splash')
+      if (splash && splash.parentElement !== host) placeInHost(splash)
+    })
+    bodyOverlayWatcher.observe(document.body, { childList: true })
+    keepOnTop()
+  }
+
+  /** Opaque cover while monetization resolves — scoped to the player box. */
+  const showEarlyCover = () => {
+    if (document.getElementById(EARLY_COVER_ID)) return
+    if (isVideoOwner()) return
+    const host = resolvePlayerHost()
+    const el = document.createElement('div')
+    el.id = EARLY_COVER_ID
+    el.setAttribute('aria-hidden', 'true')
+    if (host) {
+      try {
+        if (window.getComputedStyle(host).position === 'static') {
+          host.style.position = 'relative'
+        }
+      } catch { /* ignore */ }
+      el.style.cssText = [
+        'position:absolute',
+        'inset:0',
+        'width:100%',
+        'height:100%',
+        'z-index:2147483645',
+        'background:rgba(8,10,16,0.94)',
+        'pointer-events:all',
+      ].join(';')
+      host.appendChild(el)
+    } else {
+      // Fallback before the player element exists (brief).
+      el.style.cssText = [
+        'position:fixed',
+        'inset:0',
+        'z-index:2147483645',
+        'background:rgba(8,10,16,0.94)',
+        'pointer-events:all',
+      ].join(';')
+      ;(document.body || document.documentElement).appendChild(el)
+    }
+  }
+
+  const hideEarlyCover = () => {
+    const el = document.getElementById(EARLY_COVER_ID)
+    if (el) el.remove()
+  }
+
   const isVideoOwner = (): boolean => {
     if (!peertubeHelpers.isLoggedIn()) return false
     const user = peertubeHelpers.getUser()
@@ -910,6 +1047,7 @@ export async function register (options: RegisterClientOptions) {
     if (isLocal && !wallet && mode !== 'free') {
       console.log('[tessera] Local video is unmonetized (no wallet address set). Bypassing paywall.')
       document.body.classList.remove('arc-locked')
+      hideEarlyCover()
       return
     }
 
@@ -926,6 +1064,7 @@ export async function register (options: RegisterClientOptions) {
           : '[tessera] Free federated video (isLocal: false). Tips only, no origin teaser.'
       )
       document.body.classList.remove('arc-locked')
+      hideEarlyCover()
       if (arcCashier) arcCashier.initTipMode(wallet || '', tipAmount || '0.10')
       return
     }
@@ -940,10 +1079,12 @@ export async function register (options: RegisterClientOptions) {
           : '[tessera] Monetized federated video (isLocal: false). Paywall on this instance (full stream via fullPlaylistUrl).'
       )
       arcCashier.initPaywall(targetContainer)
+      constrainTesseraOverlaysToPlayer(targetContainer)
+      hideEarlyCover()
       return
     }
 
-    // No paywall bundle: federated PPS gets a 5s client teaser + link to origin.
+    hideEarlyCover()
     if (!isLocal) {
         console.log('[tessera] Monetized federated video without ArcCashier. Setting up origin teaser.')
         const TEASER_PREVIEW_LIMIT_SECONDS = 5
@@ -1037,6 +1178,10 @@ export async function register (options: RegisterClientOptions) {
       document.body.classList.remove('arc-resolving-owner')
       checkPageVisibility()
 
+      // Cover the player immediately while we load Tessera tags / wait for ArcCashier.
+      // Removed when paywall mounts, tip mode starts, or video is free/unmonetized.
+      if (!isVideoOwner()) showEarlyCover()
+
       const { rate, mode, wallet, tipAmount, isLocal, originInstanceUrl } = await loadTesseraDataForVideo(video, currentVideoId)
 
       // Initialize paywall engine based on the video's monetization mode
@@ -1048,6 +1193,8 @@ export async function register (options: RegisterClientOptions) {
         })
         await waitForBundle()
         initPaywallEngine(mode, wallet, tipAmount, isLocal, originInstanceUrl)
+      } else {
+        hideEarlyCover()
       }
 
       if ((window as any).arcResetVideoSession) {
@@ -1065,6 +1212,13 @@ export async function register (options: RegisterClientOptions) {
       if (params) {
         currentPlayerElement = params.playerElement || params.player?.el() || null
         console.log('[tessera] Player loaded hook triggered. Player element:', currentPlayerElement)
+        // Player chrome may appear after paywall init — re-constrain into the real host.
+        if (paywallInitialized) constrainTesseraOverlaysToPlayer(currentPlayerElement)
+        else {
+          // Move early cover into the real player as soon as it exists.
+          const early = document.getElementById(EARLY_COVER_ID)
+          if (early) constrainTesseraOverlaysToPlayer(currentPlayerElement)
+        }
       }
     }
   })
@@ -1262,10 +1416,12 @@ export async function register (options: RegisterClientOptions) {
       currentVideoId = null
       paywallInitialized = false // Allow next video to reinitialize paywall correctly
       isCleaningUp = false
+      stopContainedOverlayWatch()
       // Remove tip button when leaving a video (covers: back to menu, or switching
       // from a free video to a pay-per-second video)
       const tipContainer = document.getElementById('arc-tip-btn-container')
       if (tipContainer) tipContainer.remove()
+      hideEarlyCover()
       // Remove creator panel
       if (creatorPanelEl) {
           creatorPanelEl.remove()
