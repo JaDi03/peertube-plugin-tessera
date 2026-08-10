@@ -908,8 +908,7 @@ export async function register (options: RegisterServerOptions) {
   // Relay: forward all /api/core/* requests from the browser to the sidecar.
   // This covers: register-session, recover-session, session-balance, tip, tip-access,
   // top-up, wallet-balance, stream-access, and all /circle/* sub-routes.
-  // Cookie + Set-Cookie must pass through: Circle httpOnly auth cookies are set by the
-  // sidecar and read on later GETs (Google OAuth return after location.replace).
+  // Cookie, Set-Cookie, and anti-cache headers must pass through for Circle auth.
   router.all('/api/core/*', async (req: any, res: any) => {
     const internalUrl = await getBaseUrl()
     if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
@@ -938,6 +937,10 @@ export async function register (options: RegisterServerOptions) {
       for (const cookie of setCookies) {
         res.append('Set-Cookie', cookie)
       }
+      const cacheControl = response.headers.get('cache-control')
+      const pragma = response.headers.get('pragma')
+      if (cacheControl) res.set('Cache-Control', cacheControl)
+      if (pragma) res.set('Pragma', pragma)
 
       const data = await response.json()
       return res.status(response.status).json(data)
