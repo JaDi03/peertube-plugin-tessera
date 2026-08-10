@@ -908,6 +908,8 @@ export async function register (options: RegisterServerOptions) {
   // Relay: forward all /api/core/* requests from the browser to the sidecar.
   // This covers: register-session, recover-session, session-balance, tip, tip-access,
   // top-up, wallet-balance, stream-access, and all /circle/* sub-routes.
+  // Cookie + Set-Cookie must pass through: Circle httpOnly auth cookies are set by the
+  // sidecar and read on later GETs (Google OAuth return after location.replace).
   router.all('/api/core/*', async (req: any, res: any) => {
     const internalUrl = await getBaseUrl()
     if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
@@ -919,12 +921,23 @@ export async function register (options: RegisterServerOptions) {
       const targetUrl = `${internalUrl}${req.path}${qs}`
       const isReadOnly = ['GET', 'HEAD'].includes((req.method as string).toUpperCase())
 
+      const forwardHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (typeof req.headers.cookie === 'string' && req.headers.cookie) {
+        forwardHeaders.Cookie = req.headers.cookie
+      }
+
       const response = await fetch(targetUrl, {
         method: req.method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: forwardHeaders,
         body: isReadOnly ? undefined : JSON.stringify(req.body),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       })
+
+      const setCookieFn = (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie
+      const setCookies = typeof setCookieFn === 'function' ? setCookieFn.call(response.headers) : []
+      for (const cookie of setCookies) {
+        res.append('Set-Cookie', cookie)
+      }
 
       const data = await response.json()
       return res.status(response.status).json(data)
