@@ -286,6 +286,14 @@ export async function register (options: RegisterServerOptions) {
     if (cachedBaseUrl && Date.now() - baseUrlCacheTime < 60000) {
        return cachedBaseUrl
     }
+    const baseSetting = ((await settingsManager.getSetting('tessera-base-url') as string) || '').trim()
+    if (baseSetting) {
+      try {
+        cachedBaseUrl = new URL(baseSetting).origin
+        baseUrlCacheTime = Date.now()
+        return cachedBaseUrl
+      } catch { /* fall through */ }
+    }
     const webhookUrl = await settingsManager.getSetting('webhook-url') as string
     if (!webhookUrl) return null
     try {
@@ -297,33 +305,24 @@ export async function register (options: RegisterServerOptions) {
     }
   }
 
-  // 5.1: Rate limiting Map
-  const pingRateLimits = new Map<string, number>()
+  const isEvmAddress = (value: string): boolean => /^0x[a-fA-F0-9]{40}$/.test(value)
 
-  // 3.1: Helper to get MAX_CACHE_SIZE
-  const getMaxActiveViewers = async (): Promise<number> => {
-    const max = await settingsManager.getSetting('max-active-viewers') as string
-    return parseInt(max, 10) || 10000
-  }
-
-  // Helper to send the signed webhook
-  // 3.3: Return boolean to indicate success
-  const sendWebhook = async (event: 'viewer_joined' | 'viewer_left', payloadData: any, maxRetries = 3): Promise<boolean> => {
-    const webhookUrl = await settingsManager.getSetting('webhook-url') as string
+  /** Signed POST to Tessera /api/core/v1/sessions/start|stop. */
+  const sendSignedIngest = async (
+    path: '/api/core/v1/sessions/start' | '/api/core/v1/sessions/stop',
+    body: Record<string, unknown>,
+    maxRetries = 3
+  ): Promise<boolean> => {
+    const baseUrl = await getBaseUrl()
     const webhookSecret = await settingsManager.getSetting('webhook-secret') as string
-
-    if (!webhookUrl || !webhookSecret) {
-      peertubeHelpers.logger.warn('[tessera] Webhook not sent: Plugin configuration missing.')
+    if (!baseUrl || !webhookSecret) {
+      peertubeHelpers.logger.warn('[tessera] Ingest not sent: tessera-base-url / webhook-secret missing.')
       return false
     }
 
-    // Tessera flat connector HMAC (verifyConnectorSignature):
-    // headers X-Tessera-Timestamp / X-Tessera-Nonce / X-Tessera-Signature
-    // signature = HMAC-SHA256(secret, `${timestamp}.${nonce}.${rawBody}`)
-    // webhook-secret setting must equal TESSERA_CONNECTOR_SECRET_PEERTUBE on the sidecar.
     const timestamp = String(Date.now())
     const nonce = crypto.randomBytes(16).toString('hex')
-    const payload = JSON.stringify({ event, timestamp: Number(timestamp), nonce, ...payloadData })
+    const payload = JSON.stringify(body)
     const signature = crypto
       .createHmac('sha256', webhookSecret)
       .update(`${timestamp}.${nonce}.${payload}`)
@@ -333,8 +332,7 @@ export async function register (options: RegisterServerOptions) {
       try {
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(), 10000)
-
-        const response = await fetch(webhookUrl, {
+        const response = await fetch(`${baseUrl}${path}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -346,17 +344,15 @@ export async function register (options: RegisterServerOptions) {
           signal: controller.signal
         })
         clearTimeout(timeout)
-        
+
         if (!response.ok) {
           const errorText = await response.text()
           throw new Error(`Rejected: ${response.status} ${errorText}`)
         }
-
-        peertubeHelpers.logger.info(`[tessera] Webhook '${event}' sent for user ${payloadData.userId}.`)
         return true
       } catch (err) {
         if (i === maxRetries - 1) {
-          peertubeHelpers.logger.error(`[tessera] Error sending webhook after ${maxRetries} attempts: ${err}`)
+          peertubeHelpers.logger.error(`[tessera] Ingest ${path} failed after ${maxRetries} attempts: ${err}`)
           return false
         }
         await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)))
@@ -365,18 +361,68 @@ export async function register (options: RegisterServerOptions) {
     return false
   }
 
+  const startBillingSession = async (payloadData: {
+    userId: string
+    videoId?: string
+    ratePerSecond: number
+    creatorWallet?: string
+    tesseraMode?: string
+    adminWallet?: string
+    displayFee: number
+    instanceUrl?: string
+  }): Promise<boolean> => {
+    if (payloadData.tesseraMode === 'free') {
+      peertubeHelpers.logger.info(`[tessera] Free video for user ${payloadData.userId}. Skipping billing.`)
+      return true
+    }
+    const payoutAddress = (payloadData.creatorWallet || '').trim()
+    if (!payoutAddress || !isEvmAddress(payoutAddress)) {
+      peertubeHelpers.logger.warn(`[tessera] Invalid or missing creator wallet for user ${payloadData.userId}`)
+      return false
+    }
+
+    const splits: Array<{ address: string; fraction: number; label: string }> = []
+    const displayAdmin = (payloadData.adminWallet || '').trim()
+    if (displayAdmin && isEvmAddress(displayAdmin)) {
+      splits.push({
+        address: displayAdmin,
+        fraction: payloadData.displayFee,
+        label: 'display-admin',
+      })
+    }
+
+    return sendSignedIngest('/api/core/v1/sessions/start', {
+      userId: payloadData.userId,
+      resourceId: payloadData.videoId || 'unknown',
+      ratePerSecond: String(payloadData.ratePerSecond),
+      payoutAddress,
+      splits,
+      metadata: payloadData.instanceUrl ? { instanceUrl: payloadData.instanceUrl } : undefined,
+    })
+  }
+
+  const stopBillingSession = async (userId: string): Promise<boolean> => {
+    return sendSignedIngest('/api/core/v1/sessions/stop', { userId })
+  }
+
+  // 5.1: Rate limiting Map
+  const pingRateLimits = new Map<string, number>()
+
+  // 3.1: Helper to get MAX_CACHE_SIZE
+  const getMaxActiveViewers = async (): Promise<number> => {
+    const max = await settingsManager.getSetting('max-active-viewers') as string
+    return parseInt(max, 10) || 10000
+  }
+
   // Global checker for inactive viewers
   setInterval(() => {
     const now = Date.now()
     for (const [userId, session] of activeViewers.entries()) {
       if (now > session.expireTime && session.pendingAction !== 'stop') {
-        // 3.4: Fix ghost sessions (await viewer_left before deletion)
-        // Add a small buffer to expireTime to avoid spamming retries every 5s if sidecar is down.
-        // We temporarily bump the expireTime to avoid multiple concurrent requests.
         session.pendingAction = 'stop'
         session.expireTime = now + 15000 
         
-        sendWebhook('viewer_left', session.payload).then(success => {
+        stopBillingSession(userId).then(success => {
            if (success) {
              activeViewers.delete(userId)
            } else {
@@ -399,25 +445,25 @@ export async function register (options: RegisterServerOptions) {
     name: 'tessera-base-url',
     label: 'Tessera Base URL',
     type: 'input',
-    descriptionHTML: 'The public URL of your Tessera backend (e.g. https://tessera.try-tessera.xyz)',
+    descriptionHTML: 'Sidecar origin used for sessions, assets, and creator API (e.g. http://127.0.0.1:7878).',
     default: '',
     private: false
   })
 
   await registerSetting({
     name: 'webhook-url',
-    label: 'Tessera Webhook URL',
+    label: 'Tessera Base URL (legacy)',
     type: 'input',
-    descriptionHTML: 'The URL to send events (e.g. https://your-tessera.com/api/connectors/peertube/webhook)',
+    descriptionHTML: 'Deprecated. Prefer Tessera Base URL. If set, only the origin is used.',
     default: '',
     private: true
   })
 
   await registerSetting({
     name: 'webhook-secret',
-    label: 'Tessera Webhook Secret',
+    label: 'Tessera Ingest Secret',
     type: 'input',
-    descriptionHTML: 'Must match the sidecar env <code>TESSERA_CONNECTOR_SECRET_PEERTUBE</code>. Used for Tessera HMAC headers (X-Tessera-Timestamp / Nonce / Signature) and admin Bearer auth.',
+    descriptionHTML: 'Must equal sidecar <code>TESSERA_INGEST_SECRET</code>. HMAC for sessions/start and sessions/stop.',
     default: '',
     private: true
   })
@@ -451,22 +497,7 @@ export async function register (options: RegisterServerOptions) {
       { label: '30%', value: '0.30' }
     ],
     default: '0.10',
-    descriptionHTML: 'The commission percentage charged to creators when viewers watch videos directly on this instance.',
-    private: false
-  })
-
-  await registerSetting({
-    name: 'tessera-origin-fee',
-    label: 'Origin Fee (Hosting Commission)',
-    type: 'select',
-    options: [
-      { label: '0%', value: '0.00' },
-      { label: '10%', value: '0.10' },
-      { label: '20%', value: '0.20' },
-      { label: '30%', value: '0.30' }
-    ],
-    default: '0.10',
-    descriptionHTML: 'The commission percentage charged to creators when viewers watch videos federated from this instance on another platform.',
+    descriptionHTML: 'Commission to this instance when a viewer watches here (remainder to the creator). Default 10%.',
     private: false
   })
 
@@ -692,12 +723,10 @@ export async function register (options: RegisterServerOptions) {
     }
 
     const displayFeeStr = await settingsManager.getSetting('tessera-display-fee') as string || '0.10'
-    const originFeeStr = await settingsManager.getSetting('tessera-origin-fee') as string || '0.10'
 
     res.json({
       baseUrl,
       displayFee: parseFloat(displayFeeStr),
-      originFee: parseFloat(originFeeStr)
     })
   })
 
@@ -876,7 +905,7 @@ export async function register (options: RegisterServerOptions) {
     if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
     const filename = req.params.filename as string
     try {
-      const response = await fetch(`${internalUrl}/peertube-assets/${encodeURIComponent(filename)}`, {
+      const response = await fetch(`${internalUrl}/assets/${encodeURIComponent(filename)}`, {
         signal: AbortSignal.timeout(10000)
       })
       if (!response.ok) return res.status(response.status).send('Failed to fetch asset from sidecar')
@@ -950,18 +979,13 @@ export async function register (options: RegisterServerOptions) {
     }
   })
 
-  // Federation discovery: return PeerTube plugin dashboard settings (source of truth).
-  // Remote instances query:
-  //   GET https://peertube.remote.com/plugins/peertube-plugin-tessera/{version}/router/instance-info
-  // Do not relay to the sidecar instance-settings.json placeholder.
   router.get('/instance-info', async (_req: any, res: any) => {
     const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
     const displayFeeStr = (await settingsManager.getSetting('tessera-display-fee') as string) || '0.10'
-    const originFeeStr = (await settingsManager.getSetting('tessera-origin-fee') as string) || '0.10'
 
     if (!adminWallet) {
       return res.status(503).json({
-        error: 'Tessera not fully configured: Admin wallet address is missing. Configure it in the PeerTube plugin settings UI.',
+        error: 'Admin wallet address is missing.',
         tesseraVersion: '1.2.0',
       })
     }
@@ -969,7 +993,6 @@ export async function register (options: RegisterServerOptions) {
     return res.json({
       adminWallet,
       displayFee: parseFloat(displayFeeStr),
-      originFee: parseFloat(originFeeStr),
       tesseraVersion: '1.2.0',
     })
   })
@@ -1041,15 +1064,20 @@ export async function register (options: RegisterServerOptions) {
 
       const secret = await settingsManager.getSetting('webhook-secret') as string
       const response = await fetch(
-        `${baseUrl}/api/connectors/peertube/admin/balance?address=${encodeURIComponent(adminWallet)}`,
+        `${baseUrl}/api/core/creator/balance?address=${encodeURIComponent(adminWallet)}`,
         {
           headers: {
             'Authorization': `Bearer ${secret}`
           }
         }
       )
-      const data = await response.json()
-      return res.status(response.status).json(data)
+      const data = await response.json() as Record<string, unknown>
+      return res.status(response.status).json({
+        ...data,
+        available: data.gatewayAvailable ?? data.available,
+        withdrawable: data.gatewayWithdrawable ?? data.withdrawable,
+        total: data.gatewayTotal ?? data.total,
+      })
     } catch (err: any) {
       return res.status(500).json({ error: err.message })
     }
@@ -1073,7 +1101,7 @@ export async function register (options: RegisterServerOptions) {
       }
 
       const secret = await settingsManager.getSetting('webhook-secret') as string
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/prepare-withdraw`, {
+      const response = await fetch(`${baseUrl}/api/core/creator/prepare-withdraw`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1106,7 +1134,7 @@ export async function register (options: RegisterServerOptions) {
       }
 
       const secret = await settingsManager.getSetting('webhook-secret') as string
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/complete-withdraw`, {
+      const response = await fetch(`${baseUrl}/api/core/creator/complete-withdraw`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1134,13 +1162,8 @@ export async function register (options: RegisterServerOptions) {
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
       const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
-      const secret = await settingsManager.getSetting('webhook-secret') as string
       const qs = adminWallet ? `?address=${encodeURIComponent(adminWallet)}` : ''
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/stats${qs}`, {
-        headers: {
-          'Authorization': `Bearer ${secret}`
-        }
-      })
+      const response = await fetch(`${baseUrl}/api/core/creator/stats${qs}`)
       const data = await response.json()
       return res.status(response.status).json(data)
     } catch (err: any) {
@@ -1164,8 +1187,7 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
-      // Stats remain on the PeerTube connector; balance/withdraw live under /api/core/creator/*
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/stats?address=${encodeURIComponent(address)}`)
+      const response = await fetch(`${baseUrl}/api/core/creator/stats?address=${encodeURIComponent(address)}`)
       const data = await response.json()
       return res.status(response.status).json(data)
     } catch (err: any) {
@@ -1329,7 +1351,6 @@ export async function register (options: RegisterServerOptions) {
     const ratePerSecond = tesseraMode === 'free' ? 0 : Number(tesseraRate || '0.0001')
     const adminWallet = await settingsManager.getSetting('admin-wallet-address') as string
     const displayFeeStr = await settingsManager.getSetting('tessera-display-fee') as string || '0.10'
-    const originFeeStr = await settingsManager.getSetting('tessera-origin-fee') as string || '0.10'
 
     const payloadData = {
       userId,
@@ -1349,7 +1370,6 @@ export async function register (options: RegisterServerOptions) {
       instanceUrl,
       adminWallet: adminWallet || undefined,
       displayFee: parseFloat(displayFeeStr),
-      originFee: parseFloat(originFeeStr),
       originInstanceUrl,
       isLocal,
     }
@@ -1375,12 +1395,12 @@ export async function register (options: RegisterServerOptions) {
                const sessionToEvict = activeViewers.get(lruKey)
                activeViewers.delete(lruKey)
                if (sessionToEvict) {
-                  sendWebhook('viewer_left', sessionToEvict.payload).catch(() => {})
+                  stopBillingSession(lruKey).catch(() => {})
                }
             }
           }
 
-          const success = await sendWebhook('viewer_joined', payloadData)
+          const success = await startBillingSession(payloadData)
           if (!success) {
              activeViewers.delete(userId)
              res.status(502).json({ error: 'Failed to notify payment sidecar' })
@@ -1400,15 +1420,14 @@ export async function register (options: RegisterServerOptions) {
         const session = activeViewers.get(userId)
         if (session) {
           session.pendingAction = 'stop'
-          // Send webhook BEFORE deleting to avoid ghost sessions
-          const success = await sendWebhook('viewer_left', payloadData)
+          const success = await stopBillingSession(userId)
           const currentSession = activeViewers.get(userId)
           if (currentSession) {
              currentSession.pendingAction = null
              if (success) {
                 activeViewers.delete(userId)
              } else {
-                res.status(502).json({ error: 'Failed to stop session webhook' })
+                res.status(502).json({ error: 'Failed to stop session' })
                 return
              }
           }
