@@ -1326,7 +1326,9 @@ export async function register (options: RegisterClientOptions) {
           return
       }
 
+      // Do not queue a second start behind an in-flight ping (play + discovery race).
       if (pendingPing) {
+          if (action === 'start') return
           try { await pendingPing } catch { /* ignore */ }
       }
 
@@ -1340,10 +1342,11 @@ export async function register (options: RegisterClientOptions) {
               })
               if (!response.ok) {
                   if (response.status === 429) {
-                      console.warn('[tessera] Rate limited. Skipping this ping.')
-                  } else {
-                      console.warn(`[tessera] Ping failed with status: ${response.status}`)
+                      // Server already accepted a recent start/ping for this session.
+                      // Keep hasStarted so we do not immediately retry and loop 429s.
+                      return
                   }
+                  console.warn(`[tessera] Ping failed with status: ${response.status}`)
                   if (action === 'start') {
                       hasStarted = false
                   }

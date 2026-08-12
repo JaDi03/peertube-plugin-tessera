@@ -136,12 +136,13 @@ If you prefer installing via the PeerTube Web Console:
 
 ## Configuration
 
-Once installed, configure the plugin settings in the administration dashboard. For a detailed step-by-step walkthrough of both admin and creator monetization settings, refer to the [PeerTube Configuration Guide](https://jadi03.github.io/tessera/platforms/peertube/configuration/):
-*   **Tessera Base URL:** The public API URL of your sidecar (e.g., `https://tessera.yourdomain.com`).
-*   **Tessera Webhook URL:** The full webhook endpoint where PeerTube events are sent (e.g., `https://tessera.yourdomain.com/api/connectors/peertube/webhook`).
-*   **Tessera Webhook Secret:** The `PEERTUBE_WEBHOOK_SECRET` matching your sidecar's `.env` configuration.
-*   **Max Active Viewers:** Soft memory cap (Default: `10000`) for session cache eviction.
-*   **Admin Wallet (Arc Network):** The public address where platform fee splits are routed.
+Once installed, configure the plugin in the administration dashboard. Full guide: [PeerTube Configuration](https://jadi03.github.io/tessera/platforms/peertube/configuration/) and [Quick Start: Base URL](https://jadi03.github.io/tessera/getting-started/#3-tessera-base-url-all-platforms).
+
+*   **Tessera Base URL:** HTTP origin where the PeerTube **server** reaches Tessera (not `https://your-peertube.com`). Example: `http://127.0.0.1:7878` or, with PeerTube in Docker and Tessera on the host, often `http://172.17.0.1:7878`. Test: `curl http://HOST:7878/health`.
+*   **Tessera Ingest Secret:** Same string as `TESSERA_INGEST_SECRET` in the sidecar `.env`.
+*   **Max Active Viewers:** Soft memory cap (default `10000`) for session cache eviction.
+*   **Admin Wallet (Arc Network):** Address that receives the display fee split.
+*   **Display Fee:** Commission to this instance (default 10%); remainder to the creator.
 
 ---
 

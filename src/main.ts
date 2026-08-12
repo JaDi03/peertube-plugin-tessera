@@ -222,8 +222,7 @@ async function resolveTesseraMonetizationForVideo (
   localWebserverUrl: string
 ): Promise<{ data: TesseraPluginData, isLocal: boolean, originInstanceUrl: string }> {
   const { isLocal, originInstanceUrl } = resolveVideoLocality(video, localWebserverUrl)
-  let data: TesseraPluginData = {}
-
+  let data: TesseraPluginData
   if (video.id) {
     data = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
   } else {
@@ -437,7 +436,7 @@ export async function register (options: RegisterServerOptions) {
     name: 'tessera-base-url',
     label: 'Tessera Base URL',
     type: 'input',
-    descriptionHTML: 'Sidecar origin (e.g. http://172.17.0.1:7878 or http://127.0.0.1:7878).',
+    descriptionHTML: 'HTTP origin where <strong>this PeerTube server</strong> reaches Tessera (not your public PeerTube URL). Same host: <code>http://127.0.0.1:7878</code>. PeerTube in Docker / Tessera on host: often <code>http://172.17.0.1:7878</code>. Verify with <code>curl http://HOST:7878/health</code>.',
     default: '',
     private: false
   })
