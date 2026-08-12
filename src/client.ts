@@ -39,6 +39,15 @@ function readWalletFromVideo (video: { pluginData?: unknown } | null | undefined
   return wallet || null
 }
 
+/** Verbose client logs: localStorage.setItem('tessera-debug', '1') then reload. */
+function tesseraDebugLog (...args: unknown[]): void {
+  try {
+    if (localStorage.getItem('tessera-debug') === '1') console.log(...args)
+  } catch {
+    /* ignore */
+  }
+}
+
 
 
 export async function register (options: RegisterClientOptions) {
@@ -123,18 +132,25 @@ export async function register (options: RegisterClientOptions) {
   const pluginRoute = peertubeHelpers.getBaseRouterRoute()
   try {
     const response = await fetch(`${pluginRoute}/base-url`)
+    if (!response.ok) {
+      console.warn('[tessera] Could not load plugin settings (HTTP ' + response.status + ').')
+      return
+    }
     const data = await response.json()
-    if (data.baseUrl) {
+    if (!data.baseUrl) {
+      console.warn('[tessera] Set Tessera Base URL in PeerTube plugin settings.')
+      return
+    }
 
-      // Dynamically display platform fees in creator upload form
-      const displayFee = data.displayFee !== undefined ? data.displayFee : 0.10;
+    // Dynamically display platform fees in creator upload form
+    const displayFee = data.displayFee !== undefined ? data.displayFee : 0.10;
 
-      const updateFeeInfoHTML = () => {
-        const feeInfoEl = document.getElementById('tessera-instance-fee-info');
-        if (feeInfoEl) {
-          const creatorPct = (100 - displayFee * 100).toFixed(0);
-          const adminPct = (displayFee * 100).toFixed(0);
-          feeInfoEl.innerHTML = `
+    const updateFeeInfoHTML = () => {
+      const feeInfoEl = document.getElementById('tessera-instance-fee-info');
+      if (feeInfoEl) {
+        const creatorPct = (100 - displayFee * 100).toFixed(0);
+        const adminPct = (displayFee * 100).toFixed(0);
+        feeInfoEl.innerHTML = `
             <div style="background: rgba(255, 179, 0, 0.1); border-left: 3px solid #ffb300; padding: 10px 14px; border-radius: 6px; font-size: 12px; color: #cbd5e0; margin-top: 10px; font-family: system-ui, -apple-system, sans-serif;">
               <span style="color: #ffb300; font-weight: bold; display: block; margin-bottom: 4px;">Platform fee:</span>
               <p style="margin: 0; line-height: 1.5;">
@@ -142,17 +158,12 @@ export async function register (options: RegisterClientOptions) {
               </p>
             </div>
           `;
-        }
-      };
+      }
+    };
 
-      // Periodic check because PeerTube's SPA renders forms asynchronously after route shifts
-      updateFeeInfoHTML();
-      setInterval(updateFeeInfoHTML, 1000);
-
-    } else {
-      console.warn('[tessera] Missing base URL configuration.')
-      return
-    }
+    // Periodic check because PeerTube's SPA renders forms asynchronously after route shifts
+    updateFeeInfoHTML();
+    setInterval(updateFeeInfoHTML, 1000);
   } catch (err) {
     console.error('[tessera] Failed to fetch base URL:', err)
     return
@@ -1049,7 +1060,7 @@ export async function register (options: RegisterClientOptions) {
 
     // If a LOCAL video has no wallet address and is not explicitly free, bypass.
     if (isLocal && !wallet && mode !== 'free') {
-      console.log('[tessera] Local video is unmonetized (no wallet address set). Bypassing paywall.')
+      tesseraDebugLog('[tessera] Local video is unmonetized (no wallet address set). Bypassing paywall.')
       document.body.classList.remove('arc-locked')
       hideEarlyCover()
       return
@@ -1062,7 +1073,7 @@ export async function register (options: RegisterClientOptions) {
 
     // Free (local or federated): full watch + tips. Never show origin teaser.
     if (mode === 'free') {
-      console.log(
+      tesseraDebugLog(
         isLocal
           ? '[tessera] Free video detected. Calling ArcCashier.initTipMode()'
           : '[tessera] Free federated video (isLocal: false). Tips only, no origin teaser.'
@@ -1077,7 +1088,7 @@ export async function register (options: RegisterClientOptions) {
     // Federated teaser (~5s) is for instances WITHOUT Tessera (AP hls-proxy). With Tessera,
     // the API swaps to origin fullPlaylistUrl and lock is UI/billing.
     if (arcCashier) {
-      console.log(
+      tesseraDebugLog(
         isLocal
           ? '[tessera] Monetized local video (isLocal: true). Setting up paywall only.'
           : '[tessera] Monetized federated video (isLocal: false). Paywall on this instance (full stream via fullPlaylistUrl).'
@@ -1090,7 +1101,7 @@ export async function register (options: RegisterClientOptions) {
 
     hideEarlyCover()
     if (!isLocal) {
-        console.log('[tessera] Monetized federated video without ArcCashier. Setting up origin teaser.')
+        tesseraDebugLog('[tessera] Monetized federated video without ArcCashier. Setting up origin teaser.')
         const TEASER_PREVIEW_LIMIT_SECONDS = 5
 
         const showTeaserOverlay = () => {
@@ -1134,7 +1145,7 @@ export async function register (options: RegisterClientOptions) {
             if (v.currentTime >= TEASER_PREVIEW_LIMIT_SECONDS || v.ended) {
               v.pause()
               document.body.classList.add('arc-locked')
-              console.log('[tessera] Teaser preview limit (5s) reached. Showing overlay notice.')
+              tesseraDebugLog('[tessera] Teaser preview limit (5s) reached. Showing overlay notice.')
               showTeaserOverlay()
             }
           }
@@ -1204,7 +1215,7 @@ export async function register (options: RegisterClientOptions) {
       if ((window as any).arcResetVideoSession) {
         const rateNum = rate ? parseFloat(rate) : null
         ;(window as any).arcResetVideoSession(rateNum ?? undefined)
-        console.log(`[tessera] arcResetVideoSession called with rate=${rate ?? 'default'}`)
+        tesseraDebugLog(`[tessera] arcResetVideoSession called with rate=${rate ?? 'default'}`)
       }
       videoJustChanged = true
     }
@@ -1215,7 +1226,7 @@ export async function register (options: RegisterClientOptions) {
     handler: (params: any) => {
       if (params) {
         currentPlayerElement = params.playerElement || params.player?.el() || null
-        console.log('[tessera] Player loaded hook triggered. Player element:', currentPlayerElement)
+        tesseraDebugLog('[tessera] Player loaded hook triggered. Player element:', currentPlayerElement)
         // Player chrome may appear after paywall init — re-constrain into the real host.
         if (paywallInitialized) constrainTesseraOverlaysToPlayer(currentPlayerElement)
         else {
@@ -1232,7 +1243,7 @@ export async function register (options: RegisterClientOptions) {
     handler: async (params: any) => {
       if (params) {
         currentPlayerElement = params.playerElement || params.player?.el() || null
-        console.log('[tessera] Embed player loaded hook triggered. Player element:', currentPlayerElement)
+        tesseraDebugLog('[tessera] Embed player loaded hook triggered. Player element:', currentPlayerElement)
 
         const video = params.video || params.player?.video
         if (video) {
@@ -1305,7 +1316,7 @@ export async function register (options: RegisterClientOptions) {
           // Only start/ping actions should retry since billing depends on them.
           if (action === 'stop') return
           if (retryCount < 20) {
-              console.warn('[tessera] Delaying ping: videoId is not yet loaded. Retrying in 500ms...')
+              tesseraDebugLog('[tessera] Delaying ping: videoId is not yet loaded. Retrying in 500ms...')
               setTimeout(() => {
                   sendPing(action, retryCount + 1).catch(err => {
                       console.error('[tessera] Retried ping failed:', err)
@@ -1442,7 +1453,7 @@ export async function register (options: RegisterClientOptions) {
   }
 
   const attachVideoListeners = (video: HTMLVideoElement) => {
-    console.log('[tessera] attachVideoListeners called for video:', video)
+    tesseraDebugLog('[tessera] attachVideoListeners called for video:', video)
     if (abortController) {
         abortController.abort()
     }
@@ -1456,7 +1467,7 @@ export async function register (options: RegisterClientOptions) {
 
     // 4.1: Handle `play` event — UI clock sync is separate from ping dedup (hasStarted)
     video.addEventListener('play', () => {
-       console.log('[tessera] PLAY event detected. isPaywallUnlocked?', isPaywallUnlocked())
+       tesseraDebugLog('[tessera] PLAY event detected. isPaywallUnlocked?', isPaywallUnlocked())
        if (!isPaywallUnlocked()) return
 
        setMediaPlaying(true)
@@ -1470,7 +1481,7 @@ export async function register (options: RegisterClientOptions) {
 
     // 4.2: Handle `pause` and `ended` events
     video.addEventListener('pause', () => {
-       console.log('[tessera] PAUSE event detected.')
+       tesseraDebugLog('[tessera] PAUSE event detected.')
        hasStarted = false
        setMediaPlaying(false)
        if (pingInterval) clearInterval(pingInterval)
@@ -1479,7 +1490,7 @@ export async function register (options: RegisterClientOptions) {
     }, { signal })
 
     video.addEventListener('ended', () => {
-       console.log('[tessera] ENDED event detected.')
+       tesseraDebugLog('[tessera] ENDED event detected.')
        hasStarted = false
        setMediaPlaying(false)
        if (pingInterval) clearInterval(pingInterval)
@@ -1508,11 +1519,11 @@ export async function register (options: RegisterClientOptions) {
     
     // Video appeared or changed (User navigated to a new video page)
     if (video && video !== currentVideo) {
-      console.log('[tessera] Found new video element:', video)
+      tesseraDebugLog('[tessera] Found new video element:', video)
       
       // If we had a previous video playing, clean up its interval and stop billing
       if (currentVideo) {
-         console.log('[tessera] Cleaning up previous video state.')
+         tesseraDebugLog('[tessera] Cleaning up previous video state.')
          await cleanupVideoState()
          return
       }
@@ -1522,7 +1533,7 @@ export async function register (options: RegisterClientOptions) {
       
       // If video is already playing when we find it
       if (!video.paused && !video.ended) {
-         console.log('[tessera] Video is already playing upon discovery! Sending start.')
+         tesseraDebugLog('[tessera] Video is already playing upon discovery! Sending start.')
          if (!hasStarted && isPaywallUnlocked()) {
              hasStarted = true
              setMediaPlaying(true)
@@ -1531,7 +1542,7 @@ export async function register (options: RegisterClientOptions) {
              pingInterval = window.setInterval(() => sendPing('ping'), PING_INTERVAL_MS)
          }
       } else {
-         console.log('[tessera] Video discovered in paused/ended state.')
+         tesseraDebugLog('[tessera] Video discovered in paused/ended state.')
       }
     }
 
