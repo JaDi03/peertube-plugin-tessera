@@ -697,8 +697,9 @@ export async function register (options: RegisterServerOptions) {
   // Endpoint for the client script to retrieve the base URL and current instance fees
   router.get('/base-url', async (req: any, res: any) => {
     let baseUrl = await getBaseUrl()
+    // Always 200 so the browser does not paint a red failed-resource line when unset.
     if (!baseUrl) {
-      return res.status(404).json({ error: 'Plugin not fully configured' })
+      return res.json({ baseUrl: null, displayFee: null, configured: false })
     }
     if (baseUrl.includes('host.docker.internal')) {
       baseUrl = baseUrl.replace('host.docker.internal', 'localhost')
@@ -709,6 +710,7 @@ export async function register (options: RegisterServerOptions) {
     res.json({
       baseUrl,
       displayFee: parseFloat(displayFeeStr),
+      configured: true,
     })
   })
 
