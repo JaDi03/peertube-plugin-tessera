@@ -4,11 +4,20 @@ import { RegisterServerOptions } from '@peertube/peertube-types'
 const TIMEOUT_MS = 30000
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
 
+/** Paywall session ids from arc_cashier_user_id (email OTP / Google social; legacy arc_ kept). */
+function isValidPaywallSessionId (sessionId: unknown): sessionId is string {
+  if (typeof sessionId !== 'string' || !sessionId) return false
+  return sessionId.startsWith('email:')
+    || sessionId.startsWith('social:')
+    || sessionId.startsWith('arc_')
+}
+
 interface TesseraPluginData {
   'tessera-mode'?: string
   'tessera-rate'?: string
   'tessera-wallet'?: string
   'tessera-tip-amount'?: string
+  'tessera-full-playlist-url'?: string
 }
 
 function extractTesseraPluginData (pluginData: unknown): TesseraPluginData {
@@ -104,6 +113,145 @@ function validateTesseraWallet (pluginData: unknown): string | null {
   return null
 }
 
+/** Locality for federation: where the video was published vs where the viewer watches. */
+function resolveVideoLocality (
+  video: { isLocal?: boolean; url?: string } | null | undefined,
+  localWebserverUrl: string
+): { isLocal: boolean, originInstanceUrl: string } {
+  let originInstanceUrl = localWebserverUrl
+  let isLocal = true
+
+  // Prefer canonical video.url origin over video.isLocal.
+  // PeerTube helpers sometimes omit isLocal; `isLocal !== false` then wrongly marks remotes as local.
+  if (video?.url) {
+    try {
+      const videoOrigin = new URL(video.url).origin
+      const localOrigin = new URL(localWebserverUrl).origin
+      isLocal = videoOrigin === localOrigin
+      if (!isLocal) originInstanceUrl = videoOrigin
+    } catch {
+      if (typeof video.isLocal === 'boolean') isLocal = video.isLocal
+    }
+  } else if (typeof video?.isLocal === 'boolean') {
+    isLocal = video.isLocal
+  }
+
+  return { isLocal, originInstanceUrl }
+}
+
+async function resolveRemotePluginRouterBase (originInstanceUrl: string): Promise<string | null> {
+  const base = originInstanceUrl.replace(/\/$/, '')
+  // Unversioned short name is public (no admin token). Versioned peertube-plugin-* API often 401s.
+  return `${base}/plugins/tessera/router`
+}
+
+/**
+ * Public full HLS master URL on this instance (not the truncating teaser proxy).
+ * Used by display instances that run Tessera so they can unlock the complete stream.
+ */
+async function resolveFullHlsMasterUrl (
+  peertubeHelpers: RegisterServerOptions['peertubeHelpers'],
+  videoUuid: string,
+  webserverUrl: string
+): Promise<string | null> {
+  const base = webserverUrl.replace(/\/$/, '')
+  try {
+    const filesInfo = await peertubeHelpers.videos.getFiles(videoUuid)
+    const hlsInfo = (filesInfo as any)?.hls
+    if (typeof hlsInfo?.playlistUrl === 'string' && hlsInfo.playlistUrl.startsWith('http')) {
+      return hlsInfo.playlistUrl
+    }
+    const baseHlsPath = hlsInfo?.masterPlaylistPath || hlsInfo?.playlistPath
+    if (baseHlsPath) {
+      const { promises: fsPromises } = await import('fs')
+      const { dirname } = await import('path')
+      const dir = dirname(baseHlsPath)
+      const files = await fsPromises.readdir(dir)
+      const master = files.find((f) => f.endsWith('-master.m3u8') || f === 'master.m3u8')
+      if (master) {
+        return `${base}/static/streaming-playlists/hls/${videoUuid}/${master}`
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return `${base}/static/streaming-playlists/hls/${videoUuid}/${videoUuid}-master.m3u8`
+}
+
+/**
+ * Federated videos do not carry tessera-* pluginData over ActivityPub.
+ * Fetch monetization fields from the origin instance Tessera plugin.
+ */
+async function fetchRemoteTesseraData (
+  originInstanceUrl: string,
+  videoUuid: string
+): Promise<TesseraPluginData | null> {
+  const routerBase = await resolveRemotePluginRouterBase(originInstanceUrl)
+  if (!routerBase) return null
+
+  try {
+    const res = await fetch(
+      `${routerBase}/video/${encodeURIComponent(videoUuid)}/tessera-data`,
+      { signal: AbortSignal.timeout(5000) }
+    )
+    if (!res.ok) return null
+
+    const data = await res.json() as {
+      wallet?: string | null
+      mode?: string | null
+      rate?: string | null
+      tipAmount?: string | null
+      fullPlaylistUrl?: string | null
+    }
+
+    return {
+      'tessera-wallet': data.wallet || undefined,
+      'tessera-mode': data.mode || undefined,
+      'tessera-rate': data.rate || undefined,
+      'tessera-tip-amount': data.tipAmount || undefined,
+      'tessera-full-playlist-url': data.fullPlaylistUrl || undefined,
+    }
+  } catch {
+    return null
+  }
+}
+
+async function resolveTesseraMonetizationForVideo (
+  storageManager: { getData: <T = unknown>(key: string) => Promise<T | undefined> },
+  video: { id?: number; uuid?: string; isLocal?: boolean; url?: string; pluginData?: unknown },
+  localWebserverUrl: string
+): Promise<{ data: TesseraPluginData, isLocal: boolean, originInstanceUrl: string }> {
+  const { isLocal, originInstanceUrl } = resolveVideoLocality(video, localWebserverUrl)
+  let data: TesseraPluginData
+  if (video.id) {
+    data = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
+  } else {
+    data = extractTesseraPluginData(video.pluginData)
+  }
+
+  const needsRemoteLookup = !isLocal && (
+    !data['tessera-wallet'] ||
+    !data['tessera-mode'] ||
+    !data['tessera-rate'] ||
+    !data['tessera-full-playlist-url']
+  )
+
+  if (needsRemoteLookup && video.uuid && originInstanceUrl !== localWebserverUrl) {
+    const remote = await fetchRemoteTesseraData(originInstanceUrl, video.uuid)
+    if (remote) {
+      data = {
+        'tessera-wallet': data['tessera-wallet'] || remote['tessera-wallet'],
+        'tessera-mode': data['tessera-mode'] || remote['tessera-mode'],
+        'tessera-rate': data['tessera-rate'] || remote['tessera-rate'],
+        'tessera-tip-amount': data['tessera-tip-amount'] || remote['tessera-tip-amount'],
+        'tessera-full-playlist-url': data['tessera-full-playlist-url'] || remote['tessera-full-playlist-url'],
+      }
+    }
+  }
+
+  return { data, isLocal, originInstanceUrl }
+}
+
 interface ViewerSession {
   expireTime: number
   lastAccessTime: number
@@ -137,15 +285,115 @@ export async function register (options: RegisterServerOptions) {
     if (cachedBaseUrl && Date.now() - baseUrlCacheTime < 60000) {
        return cachedBaseUrl
     }
-    const webhookUrl = await settingsManager.getSetting('webhook-url') as string
-    if (!webhookUrl) return null
+    const baseSetting = ((await settingsManager.getSetting('tessera-base-url') as string) || '').trim()
+    if (!baseSetting) return null
     try {
-      cachedBaseUrl = new URL(webhookUrl).origin
+      cachedBaseUrl = new URL(baseSetting).origin
       baseUrlCacheTime = Date.now()
       return cachedBaseUrl
     } catch {
       return null
     }
+  }
+
+  const isEvmAddress = (value: string): boolean => /^0x[a-fA-F0-9]{40}$/.test(value)
+
+  /** Signed POST to Tessera /api/core/v1/sessions/start|stop. */
+  const sendSignedIngest = async (
+    path: '/api/core/v1/sessions/start' | '/api/core/v1/sessions/stop',
+    body: Record<string, unknown>,
+    maxRetries = 3
+  ): Promise<boolean> => {
+    const baseUrl = await getBaseUrl()
+    const webhookSecret = await settingsManager.getSetting('webhook-secret') as string
+    if (!baseUrl || !webhookSecret) {
+      peertubeHelpers.logger.warn('[tessera] Ingest not sent: tessera-base-url / webhook-secret missing.')
+      return false
+    }
+
+    const timestamp = String(Date.now())
+    const nonce = crypto.randomBytes(16).toString('hex')
+    const payload = JSON.stringify(body)
+    const signature = crypto
+      .createHmac('sha256', webhookSecret)
+      .update(`${timestamp}.${nonce}.${payload}`)
+      .digest('hex')
+
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 10000)
+        const response = await fetch(`${baseUrl}${path}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Tessera-Timestamp': timestamp,
+            'X-Tessera-Nonce': nonce,
+            'X-Tessera-Signature': signature
+          },
+          body: payload,
+          signal: controller.signal
+        })
+        clearTimeout(timeout)
+
+        if (!response.ok) {
+          const errorText = await response.text()
+          throw new Error(`Rejected: ${response.status} ${errorText}`)
+        }
+        return true
+      } catch (err) {
+        if (i === maxRetries - 1) {
+          peertubeHelpers.logger.error(`[tessera] Ingest ${path} failed after ${maxRetries} attempts: ${err}`)
+          return false
+        }
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)))
+      }
+    }
+    return false
+  }
+
+  const startBillingSession = async (payloadData: {
+    userId: string
+    videoId?: string
+    ratePerSecond: number
+    creatorWallet?: string
+    tesseraMode?: string
+    adminWallet?: string
+    displayFee: number
+    instanceUrl?: string
+  }): Promise<boolean> => {
+    if (payloadData.tesseraMode === 'free') {
+      peertubeHelpers.logger.info(`[tessera] Free video for user ${payloadData.userId}. Skipping billing.`)
+      return true
+    }
+    const payoutAddress = (payloadData.creatorWallet || '').trim()
+    if (!payoutAddress || !isEvmAddress(payoutAddress)) {
+      peertubeHelpers.logger.warn(`[tessera] Invalid or missing creator wallet for user ${payloadData.userId}`)
+      return false
+    }
+
+    const splits: Array<{ address: string; fraction: number; label: string }> = []
+    const displayAdmin = (payloadData.adminWallet || '').trim()
+    if (displayAdmin && isEvmAddress(displayAdmin)) {
+      splits.push({
+        address: displayAdmin,
+        fraction: payloadData.displayFee,
+        label: 'display-admin',
+      })
+    }
+
+    return sendSignedIngest('/api/core/v1/sessions/start', {
+      userId: payloadData.userId,
+      resourceId: payloadData.videoId || 'unknown',
+      ratePerSecond: String(payloadData.ratePerSecond),
+      payoutAddress,
+      splits,
+      metadata: payloadData.instanceUrl ? { instanceUrl: payloadData.instanceUrl } : undefined,
+    })
+  }
+
+  const stopBillingSession = async (userId: string): Promise<boolean> => {
+    return sendSignedIngest('/api/core/v1/sessions/stop', { userId })
   }
 
   // 5.1: Rate limiting Map
@@ -157,68 +405,15 @@ export async function register (options: RegisterServerOptions) {
     return parseInt(max, 10) || 10000
   }
 
-  // Helper to send the signed webhook
-  // 3.3: Return boolean to indicate success
-  const sendWebhook = async (event: 'viewer_joined' | 'viewer_left', payloadData: any, maxRetries = 3): Promise<boolean> => {
-    const webhookUrl = await settingsManager.getSetting('webhook-url') as string
-    const webhookSecret = await settingsManager.getSetting('webhook-secret') as string
-
-    if (!webhookUrl || !webhookSecret) {
-      peertubeHelpers.logger.warn('[tessera] Webhook not sent: Plugin configuration missing.')
-      return false
-    }
-
-    const timestamp = Date.now()
-    const nonce = crypto.randomBytes(16).toString('hex')
-    const payload = JSON.stringify({ event, timestamp, nonce, ...payloadData })
-    const signature = crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex')
-
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 10000)
-
-        const response = await fetch(webhookUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-PeerTube-Signature': signature
-          },
-          body: payload,
-          signal: controller.signal
-        })
-        clearTimeout(timeout)
-        
-        if (!response.ok) {
-          const errorText = await response.text()
-          throw new Error(`Rejected: ${response.status} ${errorText}`)
-        }
-
-        peertubeHelpers.logger.info(`[tessera] Webhook '${event}' sent for user ${payloadData.userId}.`)
-        return true
-      } catch (err) {
-        if (i === maxRetries - 1) {
-          peertubeHelpers.logger.error(`[tessera] Error sending webhook after ${maxRetries} attempts: ${err}`)
-          return false
-        }
-        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)))
-      }
-    }
-    return false
-  }
-
   // Global checker for inactive viewers
   setInterval(() => {
     const now = Date.now()
     for (const [userId, session] of activeViewers.entries()) {
       if (now > session.expireTime && session.pendingAction !== 'stop') {
-        // 3.4: Fix ghost sessions (await viewer_left before deletion)
-        // Add a small buffer to expireTime to avoid spamming retries every 5s if sidecar is down.
-        // We temporarily bump the expireTime to avoid multiple concurrent requests.
         session.pendingAction = 'stop'
         session.expireTime = now + 15000 
         
-        sendWebhook('viewer_left', session.payload).then(success => {
+        stopBillingSession(userId).then(success => {
            if (success) {
              activeViewers.delete(userId)
            } else {
@@ -241,25 +436,16 @@ export async function register (options: RegisterServerOptions) {
     name: 'tessera-base-url',
     label: 'Tessera Base URL',
     type: 'input',
-    descriptionHTML: 'The public URL of your Tessera backend (e.g. https://tessera.try-tessera.xyz)',
+    descriptionHTML: 'HTTP origin where <strong>this PeerTube server</strong> reaches Tessera (not your public PeerTube URL). Same host: <code>http://127.0.0.1:7878</code>. PeerTube in Docker / Tessera on host: often <code>http://172.17.0.1:7878</code>. Verify with <code>curl http://HOST:7878/health</code>.',
     default: '',
     private: false
   })
 
   await registerSetting({
-    name: 'webhook-url',
-    label: 'Tessera Webhook URL',
-    type: 'input',
-    descriptionHTML: 'The URL to send events (e.g. https://your-tessera.com/api/connectors/peertube/webhook)',
-    default: '',
-    private: true
-  })
-
-  await registerSetting({
     name: 'webhook-secret',
-    label: 'Tessera Webhook Secret',
+    label: 'Tessera Ingest Secret',
     type: 'input',
-    descriptionHTML: 'The secret used to sign HMAC SHA-256 requests',
+    descriptionHTML: 'Must equal sidecar <code>TESSERA_INGEST_SECRET</code>.',
     default: '',
     private: true
   })
@@ -293,22 +479,7 @@ export async function register (options: RegisterServerOptions) {
       { label: '30%', value: '0.30' }
     ],
     default: '0.10',
-    descriptionHTML: 'The commission percentage charged to creators when viewers watch videos directly on this instance.',
-    private: false
-  })
-
-  await registerSetting({
-    name: 'tessera-origin-fee',
-    label: 'Origin Fee (Hosting Commission)',
-    type: 'select',
-    options: [
-      { label: '0%', value: '0.00' },
-      { label: '10%', value: '0.10' },
-      { label: '20%', value: '0.20' },
-      { label: '30%', value: '0.30' }
-    ],
-    default: '0.10',
-    descriptionHTML: 'The commission percentage charged to creators when viewers watch videos federated from this instance on another platform.',
+    descriptionHTML: 'Commission to this instance when a viewer watches here (remainder to the creator). Default 10%.',
     private: false
   })
 
@@ -387,7 +558,7 @@ export async function register (options: RegisterServerOptions) {
 
   registerHook({
     target: 'filter:api.video.get.result',
-    handler: (async (video: { id?: number; pluginData?: Record<string, unknown> }) => {
+    handler: (async (video: { id?: number; uuid?: string; isLocal?: boolean; url?: string; pluginData?: Record<string, unknown> }) => {
       if (!video?.id) return video
 
       const fromApi = extractTesseraPluginData(video.pluginData)
@@ -404,7 +575,80 @@ export async function register (options: RegisterServerOptions) {
         if (stored['tessera-tip-amount']) video.pluginData['tessera-tip-amount'] = stored['tessera-tip-amount']
       }
 
+      // Local PPS: keep full HLS; paywall locks in the client (do not force teaser proxy).
+      // Remote PPS on a Tessera instance: swap federated teaser URL → origin fullPlaylistUrl.
+      try {
+        const webserverUrl = peertubeHelpers.config.getWebserverUrl()
+        if (!webserverUrl) return video
+
+        const { data, isLocal } = await resolveTesseraMonetizationForVideo(
+          storageManager,
+          video,
+          webserverUrl
+        )
+        if (data['tessera-mode'] !== 'pay-per-second') return video
+        if (isLocal) return video
+
+        const fullPlaylistUrl = data['tessera-full-playlist-url']
+        if (!fullPlaylistUrl) return video
+
+        const v = video as Record<string, any>
+        if (Array.isArray(v['streamingPlaylists']) && v['streamingPlaylists'].length > 0) {
+          v['streamingPlaylists'] = v['streamingPlaylists'].map((sp: any) => ({
+            ...sp,
+            playlistUrl: fullPlaylistUrl
+          }))
+        }
+        v['files'] = []
+      } catch {
+        // ignore locality / remote lookup errors
+      }
+
       return video
+    }) as () => unknown
+  })
+
+  // Federate truncating teaser HLS so instances WITHOUT Tessera only get ~5s.
+  // Instances WITH Tessera swap to fullPlaylistUrl via filter:api.video.get.result.
+  registerHook({
+    target: 'filter:activity-pub.video.json-ld.build.result' as any,
+    handler: (async (jsonld: any, params: { video: { id?: number; uuid?: string; pluginData?: Record<string, unknown> } }) => {
+      if (!jsonld || !params?.video?.id || !params?.video?.uuid) return jsonld
+
+      const stored = await loadTesseraVideoData(storageManager, params.video.id, params.video.pluginData)
+      if (stored['tessera-mode'] !== 'pay-per-second') return jsonld
+
+      const webserverUrl = peertubeHelpers.config.getWebserverUrl()
+      if (!webserverUrl) return jsonld
+
+      // Always publish the unversioned router path. Versioned URLs (…/tessera/1.1.TIMESTAMP/…)
+      // break federation after every plugin update (B keeps the old URL → 404).
+      const proxyBase = `${webserverUrl.replace(/\/$/, '')}/plugins/tessera/router/hls-proxy/${params.video.uuid}`
+
+      // Strip direct-playable formats so federated players cannot bypass the teaser.
+      const DIRECT_PLAYABLE_TYPES = new Set([
+        'video/mp4',
+        'video/webm',
+        'video/ogg',
+        'audio/mp4',
+        'application/x-bittorrent',
+        'application/x-bittorrent;x-scheme-handler/magnet',
+      ])
+
+      if (Array.isArray(jsonld.url)) {
+        jsonld.url = jsonld.url
+          .filter((u: any) => !DIRECT_PLAYABLE_TYPES.has(u?.mediaType))
+          .map((u: any) => {
+            if (u?.mediaType === 'application/x-mpegURL' && typeof u?.href === 'string') {
+              const filename = u.href.split('/').pop() ?? 'master.m3u8'
+              return { ...u, href: `${proxyBase}/${filename}` }
+            }
+            return u
+          })
+      }
+
+      peertubeHelpers.logger.info(`[tessera] ActivityPub JSON-LD: rewrote HLS to teaser proxy for video ${params.video.uuid}`)
+      return jsonld
     }) as () => unknown
   })
 
@@ -412,21 +656,42 @@ export async function register (options: RegisterServerOptions) {
   const router = getRouter()
 
   const loadVideoWithFallback = async (idOrUuid: string): Promise<any> => {
+    let video: any = null
     try {
-      return await peertubeHelpers.videos.loadByIdOrUUID(idOrUuid)
+      video = await peertubeHelpers.videos.loadByIdOrUUID(idOrUuid)
     } catch (err) {
       try {
         const localUrl = peertubeHelpers.config.getWebserverUrl()
         const apiRes = await fetch(`${localUrl}/api/v1/videos/${encodeURIComponent(idOrUuid)}`)
         if (apiRes.ok) {
-          const video = await apiRes.json()
-          return video
+          video = await apiRes.json()
         }
       } catch (fallbackErr) {
         peertubeHelpers.logger.warn(`[tessera] Local API fallback failed for ${idOrUuid}: ${fallbackErr}`)
       }
-      throw err
+      if (!video) throw err
     }
+
+    // Helpers sometimes omit isLocal/url that the public API exposes for remotes.
+    if (video && (typeof video.isLocal !== 'boolean' || !video.url)) {
+      try {
+        const localUrl = peertubeHelpers.config.getWebserverUrl()
+        const apiRes = await fetch(`${localUrl}/api/v1/videos/${encodeURIComponent(idOrUuid)}`, {
+          signal: AbortSignal.timeout(5000)
+        })
+        if (apiRes.ok) {
+          const apiVideo = await apiRes.json() as { isLocal?: boolean; url?: string }
+          if (typeof video.isLocal !== 'boolean' && typeof apiVideo.isLocal === 'boolean') {
+            video.isLocal = apiVideo.isLocal
+          }
+          if (!video.url && apiVideo.url) video.url = apiVideo.url
+        }
+      } catch (enrichErr) {
+        peertubeHelpers.logger.warn(`[tessera] Video locality enrich failed for ${idOrUuid}: ${enrichErr}`)
+      }
+    }
+
+    return video
   }
 
   // Endpoint for the client script to retrieve the base URL and current instance fees
@@ -440,13 +705,175 @@ export async function register (options: RegisterServerOptions) {
     }
 
     const displayFeeStr = await settingsManager.getSetting('tessera-display-fee') as string || '0.10'
-    const originFeeStr = await settingsManager.getSetting('tessera-origin-fee') as string || '0.10'
 
     res.json({
       baseUrl,
       displayFee: parseFloat(displayFeeStr),
-      originFee: parseFloat(originFeeStr)
     })
+  })
+
+  // ─── HLS Proxy Routes ──────────────────────────────────────────────────────
+  // Serves HLS manifests for federated/local viewers.
+  // Uses router.get (not router.use) because router.get is empirically confirmed to
+  // reach the handler in PeerTube's plugin router (router.use does not).
+  // Master playlists (#EXT-X-STREAM-INF) → rewrite variant URLs to go through this proxy.
+  // Variant playlists (#EXTINF:) → truncate to HLS_TEASER_SECONDS for non-paying viewers.
+
+  const HLS_TEASER_SECONDS = 5
+
+
+  router.get('/hls-proxy/:videoUuid/:playlistFile', async (req: any, res: any) => {
+    // Set CORS headers immediately for all GET responses
+    res.set('Access-Control-Allow-Origin', '*')
+    res.set('Access-Control-Allow-Methods', 'GET, OPTIONS, HEAD')
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Range, x-tessera-session')
+
+    const videoUuid = req.params.videoUuid as string
+    const playlistFile = req.params.playlistFile as string
+
+    peertubeHelpers.logger.info(`[tessera] HLS proxy request: method=${req.method}, video=${videoUuid}, file=${playlistFile}, path=${req.path}`)
+
+    const webserverUrl = peertubeHelpers.config.getWebserverUrl()
+    if (!webserverUrl) return res.status(500).json({ error: 'Server not configured' })
+
+      const isPaidSession = false
+
+    try {
+      let content: string | null = null
+
+      // Primary: obtain official disk path via PeerTube's native helper and scan directory
+      try {
+        const filesInfo = await peertubeHelpers.videos.getFiles(videoUuid)
+        const hlsInfo = (filesInfo as any)?.hls
+        const baseHlsPath = hlsInfo?.masterPlaylistPath || hlsInfo?.playlistPath
+
+        if (baseHlsPath) {
+          const { promises: fsPromises } = await import('fs')
+          const { dirname, join } = await import('path')
+          const dir = dirname(baseHlsPath)
+          const files = await fsPromises.readdir(dir)
+
+          let matchedFile: string | undefined
+          if (playlistFile.endsWith('master.m3u8') || playlistFile === 'master.m3u8') {
+            matchedFile = files.find(f => f.endsWith('-master.m3u8') || f === 'master.m3u8')
+          } else {
+            matchedFile = files.find(f => f === playlistFile || f.endsWith(playlistFile))
+          }
+
+          if (matchedFile) {
+            content = await fsPromises.readFile(join(dir, matchedFile), 'utf8')
+          }
+        }
+      } catch (fileErr: any) {
+        peertubeHelpers.logger.warn(`[tessera] getFiles lookup failed for ${videoUuid}/${playlistFile}: ${fileErr.message}`)
+      }
+
+      // Fallback A: direct container disk path
+      if (!content) {
+        try {
+          const { promises: fsPromises } = await import('fs')
+          const diskPath = `/data/streaming-playlists/hls/${videoUuid}/${playlistFile}`
+          content = await fsPromises.readFile(diskPath, 'utf8')
+        } catch {
+          // ignore
+        }
+      }
+
+      // Fallback B: HTTP fetch via webserverUrl
+      if (!content) {
+        try {
+          const realUrl = `${webserverUrl}/static/streaming-playlists/hls/${videoUuid}/${playlistFile}`
+          const response = await fetch(realUrl, { signal: AbortSignal.timeout(8000) })
+          if (response.ok) {
+            content = await response.text()
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!content) {
+        peertubeHelpers.logger.error(`[tessera] HLS proxy playlist not found for video ${videoUuid}, file ${playlistFile}`)
+        return res.status(404).end()
+      }
+
+      // Always unversioned: versioned variant URLs 404 after plugin updates (black screen on B).
+      const proxyBase = `${webserverUrl.replace(/\/$/, '')}/plugins/tessera/router/hls-proxy/${videoUuid}`
+
+      // Case A: Master Playlist (contains variant stream definitions)
+      if (content.includes('#EXT-X-STREAM-INF') || playlistFile.endsWith('master.m3u8')) {
+        const rewritten = content.replace(
+          /^(?!#)([^\s]+\.m3u8.*)$/gm,
+          (line) => `${proxyBase}/${line.trim()}`
+        )
+        res.set('Content-Type', 'application/vnd.apple.mpegurl')
+        res.set('Cache-Control', 'no-cache')
+        return res.send(rewritten)
+      }
+
+      // Case B: Variant Playlist (contains segment .ts / fMP4 files)
+      const staticBase = `${webserverUrl}/static/streaming-playlists/hls/${videoUuid}`
+      const absoluteContent = content
+        .replace(/URI="([^"]+)"/g, (_: string, uri: string) => {
+          if (uri.startsWith('http')) return `URI="${uri}"`
+          return `URI="${staticBase}/${uri}"`
+        })
+        .replace(/^(?!#)([^\s]+\.(?:ts|mp4|m4s).*)$/gm, (seg: string) => {
+          if (seg.trim().startsWith('http')) return seg.trim()
+          return `${staticBase}/${seg.trim()}`
+        })
+
+      if (isPaidSession) {
+        res.set('Content-Type', 'application/vnd.apple.mpegurl')
+        res.set('Cache-Control', 'no-cache')
+        return res.send(absoluteContent)
+      }
+
+      // Teaser: emit segments up to HLS_TEASER_SECONDS then append EXT-X-ENDLIST
+      const lines = absoluteContent.split('\n')
+      const teaserLines: string[] = []
+      let elapsed = 0
+      let i = 0
+      let teaserEnded = false
+
+      while (i < lines.length) {
+        const line = lines[i].trimEnd()
+
+        if (teaserEnded) {
+          i++
+          continue
+        }
+
+        if (line.startsWith('#EXTINF:')) {
+          const segDuration = parseFloat(line.replace('#EXTINF:', '').replace(',', ''))
+          if (elapsed >= HLS_TEASER_SECONDS) {
+            teaserLines.push('#EXT-X-ENDLIST')
+            teaserEnded = true
+            i++
+            continue
+          }
+          teaserLines.push(line)
+          elapsed += segDuration
+        } else if (!line.startsWith('#') && line.trim() !== '' && !line.startsWith('http')) {
+          i++
+          continue
+        } else {
+          teaserLines.push(line)
+        }
+        i++
+      }
+
+      if (!teaserEnded && !teaserLines.includes('#EXT-X-ENDLIST')) {
+        teaserLines.push('#EXT-X-ENDLIST')
+      }
+
+      res.set('Content-Type', 'application/vnd.apple.mpegurl')
+      res.set('Cache-Control', 'no-cache')
+      return res.send(teaserLines.join('\n'))
+    } catch (err: any) {
+      peertubeHelpers.logger.error(`[tessera] HLS proxy error (${videoUuid}/${playlistFile}): ${err.message}`)
+      return res.status(502).end()
+    }
   })
 
   // ─── Browser relay routes ──────────────────────────────────────────────────
@@ -460,7 +887,7 @@ export async function register (options: RegisterServerOptions) {
     if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
     const filename = req.params.filename as string
     try {
-      const response = await fetch(`${internalUrl}/peertube-assets/${encodeURIComponent(filename)}`, {
+      const response = await fetch(`${internalUrl}/assets/${encodeURIComponent(filename)}`, {
         signal: AbortSignal.timeout(10000)
       })
       if (!response.ok) return res.status(response.status).send('Failed to fetch asset from sidecar')
@@ -492,6 +919,7 @@ export async function register (options: RegisterServerOptions) {
   // Relay: forward all /api/core/* requests from the browser to the sidecar.
   // This covers: register-session, recover-session, session-balance, tip, tip-access,
   // top-up, wallet-balance, stream-access, and all /circle/* sub-routes.
+  // Cookie, Set-Cookie, and anti-cache headers must pass through for Circle auth.
   router.all('/api/core/*', async (req: any, res: any) => {
     const internalUrl = await getBaseUrl()
     if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
@@ -503,12 +931,27 @@ export async function register (options: RegisterServerOptions) {
       const targetUrl = `${internalUrl}${req.path}${qs}`
       const isReadOnly = ['GET', 'HEAD'].includes((req.method as string).toUpperCase())
 
+      const forwardHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (typeof req.headers.cookie === 'string' && req.headers.cookie) {
+        forwardHeaders.Cookie = req.headers.cookie
+      }
+
       const response = await fetch(targetUrl, {
         method: req.method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: forwardHeaders,
         body: isReadOnly ? undefined : JSON.stringify(req.body),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       })
+
+      const setCookieFn = (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie
+      const setCookies = typeof setCookieFn === 'function' ? setCookieFn.call(response.headers) : []
+      for (const cookie of setCookies) {
+        res.append('Set-Cookie', cookie)
+      }
+      const cacheControl = response.headers.get('cache-control')
+      const pragma = response.headers.get('pragma')
+      if (cacheControl) res.set('Cache-Control', cacheControl)
+      if (pragma) res.set('Pragma', pragma)
 
       const data = await response.json()
       return res.status(response.status).json(data)
@@ -518,24 +961,22 @@ export async function register (options: RegisterServerOptions) {
     }
   })
 
-  // Relay: expose sidecar instance-info through PeerTube's plugin URL for federation discovery.
-  // Remote PeerTube servers can query:
-  //   GET https://peertube.remote.com/plugins/peertube-plugin-tessera/{version}/router/instance-info
-  // to obtain the admin wallet and fee configuration of the origin instance,
-  // without needing the sidecar to have a public URL.
-  router.get('/instance-info', async (req: any, res: any) => {
-    const internalUrl = await getBaseUrl()
-    if (!internalUrl) return res.status(503).json({ error: 'Sidecar not configured' })
-    try {
-      const response = await fetch(`${internalUrl}/api/tessera/instance-info`, {
-        signal: AbortSignal.timeout(5000)
+  router.get('/instance-info', async (_req: any, res: any) => {
+    const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
+    const displayFeeStr = (await settingsManager.getSetting('tessera-display-fee') as string) || '0.10'
+
+    if (!adminWallet) {
+      return res.status(503).json({
+        error: 'Admin wallet address is missing.',
+        tesseraVersion: '1.2.0',
       })
-      const data = await response.json()
-      return res.status(response.status).json(data)
-    } catch (err: any) {
-      peertubeHelpers.logger.error(`[tessera] instance-info relay error: ${err.message}`)
-      return res.status(502).json({ error: 'Could not reach Tessera sidecar' })
     }
+
+    return res.json({
+      adminWallet,
+      displayFee: parseFloat(displayFeeStr),
+      tesseraVersion: '1.2.0',
+    })
   })
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -544,15 +985,35 @@ export async function register (options: RegisterServerOptions) {
   router.get('/video/:id/tessera-data', async (req: any, res: any) => {
     const videoId = req.params.id
     try {
-      const video = await loadVideoWithFallback(videoId) as { id?: number; pluginData?: unknown }
+      const video = await loadVideoWithFallback(videoId) as {
+        id?: number
+        uuid?: string
+        isLocal?: boolean
+        url?: string
+        pluginData?: unknown
+      }
       if (!video?.id) return res.status(404).json({ error: 'Video not found' })
 
-      const data = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
+      const localWebserverUrl = peertubeHelpers.config.getWebserverUrl()
+      const { data, isLocal, originInstanceUrl } = await resolveTesseraMonetizationForVideo(
+        storageManager,
+        video,
+        localWebserverUrl
+      )
+
+      let fullPlaylistUrl: string | null = data['tessera-full-playlist-url'] || null
+      if (isLocal && data['tessera-mode'] === 'pay-per-second' && video.uuid) {
+        fullPlaylistUrl = await resolveFullHlsMasterUrl(peertubeHelpers, video.uuid, localWebserverUrl)
+      }
+
       res.json({
         wallet: data['tessera-wallet'] || null,
         mode: data['tessera-mode'] || null,
         rate: data['tessera-rate'] || null,
         tipAmount: data['tessera-tip-amount'] || null,
+        fullPlaylistUrl,
+        isLocal,
+        originInstanceUrl,
       })
     } catch (err) {
       peertubeHelpers.logger.warn(`[tessera] Error fetching video data for ${videoId}: ${err}`)
@@ -578,14 +1039,27 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
+      const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
+      if (!adminWallet) {
+        return res.status(400).json({ error: 'Admin wallet address is not configured or invalid' })
+      }
+
       const secret = await settingsManager.getSetting('webhook-secret') as string
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/balance`, {
-        headers: {
-          'Authorization': `Bearer ${secret}`
+      const response = await fetch(
+        `${baseUrl}/api/core/creator/balance?address=${encodeURIComponent(adminWallet)}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${secret}`
+          }
         }
+      )
+      const data = await response.json() as Record<string, unknown>
+      return res.status(response.status).json({
+        ...data,
+        available: data.gatewayAvailable ?? data.available,
+        withdrawable: data.gatewayWithdrawable ?? data.withdrawable,
+        total: data.gatewayTotal ?? data.total,
       })
-      const data = await response.json()
-      return res.status(response.status).json(data)
     } catch (err: any) {
       return res.status(500).json({ error: err.message })
     }
@@ -603,13 +1077,19 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
+      const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
+      if (!adminWallet) {
+        return res.status(400).json({ error: 'Admin wallet address is not configured or invalid' })
+      }
+
       const secret = await settingsManager.getSetting('webhook-secret') as string
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/prepare-withdraw`, {
+      const response = await fetch(`${baseUrl}/api/core/creator/prepare-withdraw`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${secret}`
-        }
+        },
+        body: JSON.stringify({ address: adminWallet })
       })
       const data = await response.json()
       return res.status(response.status).json(data)
@@ -630,14 +1110,19 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
+      const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
+      if (!adminWallet) {
+        return res.status(400).json({ error: 'Admin wallet address is not configured or invalid' })
+      }
+
       const secret = await settingsManager.getSetting('webhook-secret') as string
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/complete-withdraw`, {
+      const response = await fetch(`${baseUrl}/api/core/creator/complete-withdraw`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${secret}`
         },
-        body: JSON.stringify(req.body)
+        body: JSON.stringify({ ...req.body, address: adminWallet })
       })
       const data = await response.json()
       return res.status(response.status).json(data)
@@ -658,12 +1143,9 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
-      const secret = await settingsManager.getSetting('webhook-secret') as string
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/admin/stats`, {
-        headers: {
-          'Authorization': `Bearer ${secret}`
-        }
-      })
+      const adminWallet = ((await settingsManager.getSetting('admin-wallet-address')) as string || '').trim()
+      const qs = adminWallet ? `?address=${encodeURIComponent(adminWallet)}` : ''
+      const response = await fetch(`${baseUrl}/api/core/creator/stats${qs}`)
       const data = await response.json()
       return res.status(response.status).json(data)
     } catch (err: any) {
@@ -687,7 +1169,7 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/stats?address=${encodeURIComponent(address)}`)
+      const response = await fetch(`${baseUrl}/api/core/creator/stats?address=${encodeURIComponent(address)}`)
       const data = await response.json()
       return res.status(response.status).json(data)
     } catch (err: any) {
@@ -706,7 +1188,7 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/balance?address=${encodeURIComponent(address)}`)
+      const response = await fetch(`${baseUrl}/api/core/creator/balance?address=${encodeURIComponent(address)}`)
       const data = await response.json()
       return res.status(response.status).json(data)
     } catch (err: any) {
@@ -720,7 +1202,7 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/prepare-withdraw`, {
+      const response = await fetch(`${baseUrl}/api/core/creator/prepare-withdraw`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req.body)
@@ -738,7 +1220,7 @@ export async function register (options: RegisterServerOptions) {
       const baseUrl = await getBaseUrl()
       if (!baseUrl) return res.status(500).json({ error: 'Base URL not configured' })
 
-      const response = await fetch(`${baseUrl}/api/connectors/peertube/creator/complete-withdraw`, {
+      const response = await fetch(`${baseUrl}/api/core/creator/complete-withdraw`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req.body)
@@ -767,8 +1249,9 @@ export async function register (options: RegisterServerOptions) {
     if (action !== 'start' && action !== 'stop' && action !== 'ping') {
        return res.status(400).json({ error: 'Invalid action' })
     }
-    // sessionId is set by paywall.js in the browser's localStorage (arc_cashier_user_id)
-    if (typeof sessionId !== 'string' || !sessionId || !sessionId.startsWith('arc_')) {
+    // sessionId is set by paywall.js in localStorage (arc_cashier_user_id):
+    // email:<addr>, social:<providerId>, or legacy arc_<id>
+    if (!isValidPaywallSessionId(sessionId)) {
        return res.status(400).json({ error: 'Missing or invalid sessionId' })
     }
 
@@ -792,14 +1275,6 @@ export async function register (options: RegisterServerOptions) {
       if (video) {
         if (video.uuid) videoUuid = video.uuid
         if (video.name) videoName = video.name
-        isLocal = video.isLocal !== false
-        if (!isLocal && video.url) {
-          try {
-            originInstanceUrl = new URL(video.url).origin
-          } catch {
-            // Keep local fallback
-          }
-        }
         if (video.VideoChannel) {
           channelId = video.VideoChannel.name || video.VideoChannel.id.toString()
           channelName = video.VideoChannel.displayName || channelId
@@ -810,11 +1285,23 @@ export async function register (options: RegisterServerOptions) {
         if (video.Account) {
           accountName = video.Account.name || video.Account.displayName || ''
         }
-        if (video.id) {
-          const myData = await loadTesseraVideoData(storageManager, video.id, video.pluginData)
-          if (myData['tessera-mode']) tesseraMode = myData['tessera-mode']
-          if (myData['tessera-rate']) tesseraRate = myData['tessera-rate']
-          if (myData['tessera-wallet']) tesseraWallet = myData['tessera-wallet']
+
+        const resolved = await resolveTesseraMonetizationForVideo(
+          storageManager,
+          video,
+          peertubeHelpers.config.getWebserverUrl()
+        )
+        isLocal = resolved.isLocal
+        originInstanceUrl = resolved.originInstanceUrl
+        if (resolved.data['tessera-mode']) tesseraMode = resolved.data['tessera-mode']
+        if (resolved.data['tessera-rate']) tesseraRate = resolved.data['tessera-rate']
+        if (resolved.data['tessera-wallet']) tesseraWallet = resolved.data['tessera-wallet']
+
+        if (!isLocal) {
+          peertubeHelpers.logger.info(
+            `[tessera] Federated ping video=${videoUuid} origin=${originInstanceUrl} ` +
+            `wallet=${tesseraWallet ? 'ok' : 'missing'} mode=${tesseraMode}`
+          )
         }
       }
     } catch {
@@ -846,7 +1333,6 @@ export async function register (options: RegisterServerOptions) {
     const ratePerSecond = tesseraMode === 'free' ? 0 : Number(tesseraRate || '0.0001')
     const adminWallet = await settingsManager.getSetting('admin-wallet-address') as string
     const displayFeeStr = await settingsManager.getSetting('tessera-display-fee') as string || '0.10'
-    const originFeeStr = await settingsManager.getSetting('tessera-origin-fee') as string || '0.10'
 
     const payloadData = {
       userId,
@@ -866,7 +1352,6 @@ export async function register (options: RegisterServerOptions) {
       instanceUrl,
       adminWallet: adminWallet || undefined,
       displayFee: parseFloat(displayFeeStr),
-      originFee: parseFloat(originFeeStr),
       originInstanceUrl,
       isLocal,
     }
@@ -892,12 +1377,12 @@ export async function register (options: RegisterServerOptions) {
                const sessionToEvict = activeViewers.get(lruKey)
                activeViewers.delete(lruKey)
                if (sessionToEvict) {
-                  sendWebhook('viewer_left', sessionToEvict.payload).catch(() => {})
+                  stopBillingSession(lruKey).catch(() => {})
                }
             }
           }
 
-          const success = await sendWebhook('viewer_joined', payloadData)
+          const success = await startBillingSession(payloadData)
           if (!success) {
              activeViewers.delete(userId)
              res.status(502).json({ error: 'Failed to notify payment sidecar' })
@@ -917,15 +1402,14 @@ export async function register (options: RegisterServerOptions) {
         const session = activeViewers.get(userId)
         if (session) {
           session.pendingAction = 'stop'
-          // Send webhook BEFORE deleting to avoid ghost sessions
-          const success = await sendWebhook('viewer_left', payloadData)
+          const success = await stopBillingSession(userId)
           const currentSession = activeViewers.get(userId)
           if (currentSession) {
              currentSession.pendingAction = null
              if (success) {
                 activeViewers.delete(userId)
              } else {
-                res.status(502).json({ error: 'Failed to stop session webhook' })
+                res.status(502).json({ error: 'Failed to stop session' })
                 return
              }
           }

@@ -128,18 +128,18 @@ export async function register (options: RegisterClientOptions) {
 
       // Dynamically display platform fees in creator upload form
       const displayFee = data.displayFee !== undefined ? data.displayFee : 0.10;
-      const originFee = data.originFee !== undefined ? data.originFee : 0.10;
 
       const updateFeeInfoHTML = () => {
         const feeInfoEl = document.getElementById('tessera-instance-fee-info');
         if (feeInfoEl) {
+          const creatorPct = (100 - displayFee * 100).toFixed(0);
+          const adminPct = (displayFee * 100).toFixed(0);
           feeInfoEl.innerHTML = `
-            <div style="background: rgba(49, 130, 206, 0.1); border-left: 3px solid #3182ce; padding: 10px 14px; border-radius: 6px; font-size: 12px; color: #cbd5e0; margin-top: 10px; font-family: system-ui, -apple-system, sans-serif;">
-              <span style="color: #63b3ed; font-weight: bold; display: block; margin-bottom: 4px;">📊 Platform Fees:</span>
-              <ul style="margin: 0; padding-left: 18px; list-style-type: disc; line-height: 1.5;">
-                <li><strong>Display Fee:</strong> ${(displayFee * 100).toFixed(0)}% commission if the video is watched directly on this site (you receive the ${(100 - displayFee * 100).toFixed(0)}% remainder).</li>
-                <li><strong>Origin Fee:</strong> ${(originFee * 100).toFixed(0)}% commission if your video is watched federated on another external server (the viewer's server display fee will also apply).</li>
-              </ul>
+            <div style="background: rgba(255, 179, 0, 0.1); border-left: 3px solid #ffb300; padding: 10px 14px; border-radius: 6px; font-size: 12px; color: #cbd5e0; margin-top: 10px; font-family: system-ui, -apple-system, sans-serif;">
+              <span style="color: #ffb300; font-weight: bold; display: block; margin-bottom: 4px;">Platform fee:</span>
+              <p style="margin: 0; line-height: 1.5;">
+                ${adminPct}% to this instance, ${creatorPct}% to the creator when viewers watch here.
+              </p>
             </div>
           `;
         }
@@ -203,6 +203,143 @@ export async function register (options: RegisterClientOptions) {
   // Prevents double-initialization when the hook fires multiple times.
   let paywallInitialized = false
 
+  const EARLY_COVER_ID = 'tessera-early-cover'
+  // PeerTube-only: Tessera core mounts the overlay on document.body (fullscreen) so
+  // Jellyfin OSD clicks work. Here we reparent into the player so gallery/nav stay usable.
+  let containedOverlayObserver: MutationObserver | null = null
+  let bodyOverlayWatcher: MutationObserver | null = null
+
+  const resolvePlayerHost = (preferred?: Element | null): HTMLElement | null => {
+    const candidates = [
+      preferred,
+      currentPlayerElement,
+      document.querySelector('.video-wrapper'),
+      document.querySelector('.peertube-player-container'),
+      document.querySelector('.video-js'),
+      document.querySelector('video-player'),
+    ]
+    for (const c of candidates) {
+      if (c instanceof HTMLElement && c !== document.body) return c
+    }
+    return null
+  }
+
+  const stopContainedOverlayWatch = () => {
+    if (containedOverlayObserver) {
+      containedOverlayObserver.disconnect()
+      containedOverlayObserver = null
+    }
+    if (bodyOverlayWatcher) {
+      bodyOverlayWatcher.disconnect()
+      bodyOverlayWatcher = null
+    }
+  }
+
+  /**
+   * Moves Tessera fullscreen overlays into the PeerTube player box.
+   * Uses core CSS class arc-contained-overlay (absolute inset over the host).
+   */
+  const constrainTesseraOverlaysToPlayer = (preferredHost?: Element | null) => {
+    const host = resolvePlayerHost(preferredHost)
+    if (!host) return
+
+    try {
+      if (window.getComputedStyle(host).position === 'static') {
+        host.style.position = 'relative'
+      }
+    } catch { /* ignore */ }
+
+    const placeInHost = (el: HTMLElement | null) => {
+      if (!el) return
+      if (el.id === 'arc-paywall-overlay') {
+        el.classList.add('arc-contained-overlay')
+        // Clear any inline fullscreen sizing left from body mount.
+        el.style.position = ''
+        el.style.inset = ''
+        el.style.width = ''
+        el.style.height = ''
+        el.style.top = ''
+        el.style.left = ''
+      } else {
+        // Early cover / social splash: absolute fill of the player only.
+        el.style.position = 'absolute'
+        el.style.inset = '0'
+        el.style.width = '100%'
+        el.style.height = '100%'
+        el.style.zIndex = '2147483646'
+      }
+      if (el.parentElement !== host) host.appendChild(el)
+      if (host.lastElementChild !== el) host.appendChild(el)
+    }
+
+    placeInHost(document.getElementById('arc-paywall-overlay'))
+    placeInHost(document.getElementById(EARLY_COVER_ID))
+    placeInHost(document.getElementById('arc-social-resume-splash'))
+
+    const keepOnTop = () => {
+      const overlay = document.getElementById('arc-paywall-overlay')
+      if (!overlay || !overlay.isConnected) return
+      placeInHost(overlay)
+    }
+
+    if (containedOverlayObserver) containedOverlayObserver.disconnect()
+    containedOverlayObserver = new MutationObserver(keepOnTop)
+    containedOverlayObserver.observe(host, { childList: true })
+
+    // Core may recreate the overlay on body (e.g. re-init). Catch and reparent.
+    if (bodyOverlayWatcher) bodyOverlayWatcher.disconnect()
+    bodyOverlayWatcher = new MutationObserver(() => {
+      const overlay = document.getElementById('arc-paywall-overlay')
+      if (overlay && overlay.parentElement !== host) placeInHost(overlay)
+      const splash = document.getElementById('arc-social-resume-splash')
+      if (splash && splash.parentElement !== host) placeInHost(splash)
+    })
+    bodyOverlayWatcher.observe(document.body, { childList: true })
+    keepOnTop()
+  }
+
+  /** Opaque cover while monetization resolves — scoped to the player box. */
+  const showEarlyCover = () => {
+    if (document.getElementById(EARLY_COVER_ID)) return
+    if (isVideoOwner()) return
+    const host = resolvePlayerHost()
+    const el = document.createElement('div')
+    el.id = EARLY_COVER_ID
+    el.setAttribute('aria-hidden', 'true')
+    if (host) {
+      try {
+        if (window.getComputedStyle(host).position === 'static') {
+          host.style.position = 'relative'
+        }
+      } catch { /* ignore */ }
+      el.style.cssText = [
+        'position:absolute',
+        'inset:0',
+        'width:100%',
+        'height:100%',
+        'z-index:2147483645',
+        'background:rgba(8,10,16,0.94)',
+        'pointer-events:all',
+      ].join(';')
+      host.appendChild(el)
+    } else {
+      // Fallback before the player element exists (brief).
+      el.style.cssText = [
+        'position:fixed',
+        'inset:0',
+        'z-index:2147483645',
+        'background:rgba(8,10,16,0.94)',
+        'pointer-events:all',
+      ].join(';')
+      ;(document.body || document.documentElement).appendChild(el)
+    }
+  }
+
+  const hideEarlyCover = () => {
+    const el = document.getElementById(EARLY_COVER_ID)
+    if (el) el.remove()
+  }
+
   const isVideoOwner = (): boolean => {
     if (!peertubeHelpers.isLoggedIn()) return false
     const user = peertubeHelpers.getUser()
@@ -211,7 +348,7 @@ export async function register (options: RegisterClientOptions) {
   }
 
   const checkPageVisibility = () => {
-      const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/')
+      const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/') || window.location.pathname.includes('/embed/')
       const hideWhileResolvingOwner = isWatchPage
         && peertubeHelpers.isLoggedIn()
         && (pendingOwnerCheck || currentVideoOwner === null)
@@ -226,10 +363,10 @@ export async function register (options: RegisterClientOptions) {
   }
 
   const prefetchVideoOwner = async () => {
-    const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/')
-    if (!isWatchPage || !peertubeHelpers.isLoggedIn()) return
+    const isWatchPage = window.location.pathname.includes('/watch') || window.location.pathname.includes('/w/') || window.location.pathname.includes('/embed/')
+    if (!isWatchPage) return
 
-    const match = window.location.pathname.match(/\/(?:watch|w)\/([^/?#]+)/)
+    const match = window.location.pathname.match(/\/(?:watch|w|embed)\/([^/?#]+)/)
     if (!match?.[1]) return
 
     pendingOwnerCheck = true
@@ -342,18 +479,20 @@ export async function register (options: RegisterClientOptions) {
         let html = `
           <table style="width: 100%; border-collapse: collapse; font-size: 10px; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.1);">
             <thead>
-              <tr style="text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); color: #90cdf4;">
-                <th style="padding: 4px 0;">Video ID</th>
+              <tr style="text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ffb300;">
+                <th style="padding: 4px 0;">Resource</th>
                 <th style="padding: 4px 0; text-align: right;">Earnings</th>
               </tr>
             </thead>
             <tbody>
         `
         for (const s of data.stats) {
+          const label = s.resourceId || s.videoName || '—'
+          const amount = Number(s.amount)
           html += `
             <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-              <td style="padding: 4px 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.videoName}</td>
-              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #48bb78;">$${Number(s.amount).toFixed(4)}</td>
+              <td style="padding: 4px 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${label}</td>
+              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #ffb300;">$${Number.isFinite(amount) ? amount.toFixed(4) : '0.0000'}</td>
             </tr>
           `
         }
@@ -512,20 +651,20 @@ export async function register (options: RegisterClientOptions) {
           bottom: 20px;
           right: 20px;
           z-index: 10050;
-          background: rgba(17, 24, 39, 0.95);
+          background: rgba(6, 7, 10, 0.95);
           color: #f7fafc;
-          border: 1px solid rgba(99, 179, 237, 0.35);
+          border: 1px solid rgba(255, 179, 0, 0.35);
           border-radius: 12px;
           padding: 14px 16px;
           min-width: 240px;
-          box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+          box-shadow: 0 8px 24px rgba(0,0,0,0.45);
           font-family: system-ui, -apple-system, sans-serif;
         }
         #tessera-creator-panel h4 {
           margin: 0 0 8px;
           font-size: 13px;
-          font-weight: 600;
-          color: #90cdf4;
+          font-weight: 700;
+          color: #ffb300;
         }
         #tessera-creator-panel .tessera-wallet {
           font-size: 10px;
@@ -546,15 +685,16 @@ export async function register (options: RegisterClientOptions) {
           border-radius: 8px;
           cursor: pointer;
           font-size: 12px;
-          font-weight: 600;
+          font-weight: 700;
         }
         #tessera-creator-panel .btn-balance {
-          background: #2b6cb0;
-          color: white;
+          background: #ffb300;
+          color: #000;
         }
         #tessera-creator-panel .btn-withdraw {
-          background: #38a169;
-          color: white;
+          background: transparent;
+          color: #ffb300;
+          border: 1px solid rgba(255, 179, 0, 0.5);
         }
         #tessera-creator-panel button:disabled {
           opacity: 0.6;
@@ -616,20 +756,20 @@ export async function register (options: RegisterClientOptions) {
         let html = `
           <table style="width: 100%; border-collapse: collapse; font-size: 10px; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.1);">
             <thead>
-              <tr style="text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ecc94b;">
-                <th style="padding: 4px 0;">Video ID</th>
-                <th style="padding: 4px 0; text-align: right;">Display</th>
-                <th style="padding: 4px 0; text-align: right;">Origin</th>
+              <tr style="text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ffb300;">
+                <th style="padding: 4px 0;">Resource</th>
+                <th style="padding: 4px 0; text-align: right;">Earnings</th>
               </tr>
             </thead>
             <tbody>
         `
         for (const s of data.stats) {
+          const label = s.resourceId || s.videoName || '—'
+          const amount = Number(s.amount)
           html += `
             <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-              <td style="padding: 4px 0; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.videoName}</td>
-              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #48bb78;">$${Number(s.displayAmount).toFixed(4)}</td>
-              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #4299e1;">$${Number(s.originAmount).toFixed(4)}</td>
+              <td style="padding: 4px 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${label}</td>
+              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #ffb300;">$${Number.isFinite(amount) ? amount.toFixed(4) : '0.0000'}</td>
             </tr>
           `
         }
@@ -773,20 +913,20 @@ export async function register (options: RegisterClientOptions) {
           bottom: 20px;
           right: 20px;
           z-index: 10050;
-          background: rgba(17, 24, 39, 0.95);
+          background: rgba(6, 7, 10, 0.95);
           color: #f7fafc;
-          border: 1px solid rgba(236, 201, 75, 0.35); /* Yellow/Gold border for admin */
+          border: 1px solid rgba(255, 179, 0, 0.35);
           border-radius: 12px;
           padding: 14px 16px;
           min-width: 240px;
-          box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+          box-shadow: 0 8px 24px rgba(0,0,0,0.45);
           font-family: system-ui, -apple-system, sans-serif;
         }
         #tessera-admin-panel h4 {
           margin: 0 0 8px;
           font-size: 13px;
-          font-weight: 600;
-          color: #ecc94b; /* Gold text */
+          font-weight: 700;
+          color: #ffb300;
         }
         #tessera-admin-panel .tessera-wallet {
           font-size: 10px;
@@ -807,15 +947,16 @@ export async function register (options: RegisterClientOptions) {
           border-radius: 8px;
           cursor: pointer;
           font-size: 12px;
-          font-weight: 600;
+          font-weight: 700;
         }
         #tessera-admin-panel .btn-balance {
-          background: #d69e2e;
-          color: white;
+          background: #ffb300;
+          color: #000;
         }
         #tessera-admin-panel .btn-withdraw {
-          background: #38a169;
-          color: white;
+          background: transparent;
+          color: #ffb300;
+          border: 1px solid rgba(255, 179, 0, 0.5);
         }
         #tessera-admin-panel button:disabled {
           opacity: 0.6;
@@ -863,21 +1004,24 @@ export async function register (options: RegisterClientOptions) {
     void updateAdminPanelBalance()
   }
 
-  // Returns wallet, rate, and mode for the given video (from pluginData or server).
+  // Returns wallet, rate, mode, isLocal, and originInstanceUrl for the given video.
   const loadTesseraDataForVideo = async (
     video: { pluginData?: unknown } | null | undefined,
     videoId: string | null
-  ): Promise<{ wallet: string | null, rate: string | null, mode: string, tipAmount: string | null }> => {
+  ): Promise<{ wallet: string | null, rate: string | null, mode: string, tipAmount: string | null, isLocal: boolean, originInstanceUrl: string | null }> => {
     currentCreatorWallet = readWalletFromVideo(video)
 
     if (!videoId) {
       renderCreatorPanel()
-      return { wallet: currentCreatorWallet, rate: null, mode: 'pay-per-second', tipAmount: null }
+      return { wallet: currentCreatorWallet, rate: null, mode: 'pay-per-second', tipAmount: null, isLocal: true, originInstanceUrl: null }
     }
 
     let rate: string | null = null
     let mode = 'pay-per-second' // safe default: always block unless explicitly free
     let tipAmount: string | null = null
+    let isLocal = true
+    let originInstanceUrl: string | null = null
+
     try {
       const pluginRoute = peertubeHelpers.getBaseRouterRoute()
       const res = await fetch(`${pluginRoute}/video/${videoId}/tessera-data`)
@@ -887,46 +1031,182 @@ export async function register (options: RegisterClientOptions) {
         if (data.rate) rate = data.rate
         if (data.mode) mode = data.mode
         if (data.tipAmount) tipAmount = data.tipAmount
+        if (data.isLocal !== undefined) isLocal = Boolean(data.isLocal)
+        if (data.originInstanceUrl) originInstanceUrl = data.originInstanceUrl
       }
     } catch (err) {
       console.error('[tessera] Failed to fetch tessera data:', err)
     }
 
     renderCreatorPanel()
-    return { wallet: currentCreatorWallet, rate, mode, tipAmount }
+    return { wallet: currentCreatorWallet, rate, mode, tipAmount, isLocal, originInstanceUrl }
   }
 
   // Initializes the paywall engine for the current video mode.
   // Guards against double-initialization across hook re-fires.
-  const initPaywallEngine = (mode: string | null, wallet: string | null, tipAmount?: string | null) => {
+  const initPaywallEngine = (mode: string | null, wallet: string | null, tipAmount?: string | null, isLocal = true, originInstanceUrl?: string | null) => {
     if (paywallInitialized) return
 
-    // If the video has no wallet address configured and is not explicitly a free video,
-    // it is a standard unmonetized video. We must bypass the paywall entirely.
-    if (!wallet && mode !== 'free') {
-      console.log('[tessera] Video is unmonetized (no wallet address set). Bypassing paywall.')
+    // If a LOCAL video has no wallet address and is not explicitly free, bypass.
+    if (isLocal && !wallet && mode !== 'free') {
+      console.log('[tessera] Local video is unmonetized (no wallet address set). Bypassing paywall.')
       document.body.classList.remove('arc-locked')
+      hideEarlyCover()
       return
     }
 
     paywallInitialized = true
 
     const arcCashier = (window as any).ArcCashier
-    if (!arcCashier) {
-      console.warn('[tessera] ArcCashier not available yet — paywall.bundle.js may still be loading.')
+    const targetContainer = currentPlayerElement || document.querySelector('.peertube-player-container, .video-js, video-player')
+
+    // Free (local or federated): full watch + tips. Never show origin teaser.
+    if (mode === 'free') {
+      console.log(
+        isLocal
+          ? '[tessera] Free video detected. Calling ArcCashier.initTipMode()'
+          : '[tessera] Free federated video (isLocal: false). Tips only, no origin teaser.'
+      )
+      document.body.classList.remove('arc-locked')
+      hideEarlyCover()
+      if (arcCashier) arcCashier.initTipMode(wallet || '', tipAmount || '0.10')
       return
     }
 
-    const targetContainer = currentPlayerElement || document.querySelector('.peertube-player-container, .video-js, video-player')
-
-    if (mode === 'free') {
-      console.log('[tessera] Free video detected. Calling ArcCashier.initTipMode()')
-      // Ensure no lingering lock from a previous pay-per-second video
-      document.body.classList.remove('arc-locked')
-      arcCashier.initTipMode(wallet || '', tipAmount || '0.10')
-    } else {
-      console.log('[tessera] Pay-per-second video detected. Calling ArcCashier.initPaywall() with target container:', targetContainer)
+    // Pay-per-second: same deposit paywall on local and federated when Tessera is present.
+    // Federated teaser (~5s) is for instances WITHOUT Tessera (AP hls-proxy). With Tessera,
+    // the API swaps to origin fullPlaylistUrl and lock is UI/billing.
+    if (arcCashier) {
+      console.log(
+        isLocal
+          ? '[tessera] Monetized local video (isLocal: true). Setting up paywall only.'
+          : '[tessera] Monetized federated video (isLocal: false). Paywall on this instance (full stream via fullPlaylistUrl).'
+      )
       arcCashier.initPaywall(targetContainer)
+      constrainTesseraOverlaysToPlayer(targetContainer)
+      hideEarlyCover()
+      return
+    }
+
+    hideEarlyCover()
+    if (!isLocal) {
+        console.log('[tessera] Monetized federated video without ArcCashier. Setting up origin teaser.')
+        const TEASER_PREVIEW_LIMIT_SECONDS = 5
+
+        const showTeaserOverlay = () => {
+          let teaserNoticeEl = document.getElementById('tessera-teaser-notice')
+          if (!teaserNoticeEl) {
+            const hostContainer = currentPlayerElement || targetContainer || document.querySelector('.peertube-player-container, .video-js, video-player, body')
+            if (hostContainer) {
+              teaserNoticeEl = document.createElement('div')
+              teaserNoticeEl.id = 'tessera-teaser-notice'
+              teaserNoticeEl.style.cssText = 'position: absolute; inset: 0; background: rgba(0, 0, 0, 0.88); backdrop-filter: blur(10px); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 999999; color: #fff; text-align: center; padding: 16px; font-family: system-ui, -apple-system, sans-serif;'
+
+              const targetUrl = originInstanceUrl || window.location.href
+              teaserNoticeEl.innerHTML = `
+              <div style="background: rgba(13, 17, 23, 0.96); border: 1px solid rgba(255, 179, 0, 0.5); border-radius: 16px; padding: 24px 26px; max-width: 360px; width: 90%; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8), 0 0 30px rgba(255, 179, 0, 0.2); text-align: center;">
+                <div style="background: rgba(255, 179, 0, 0.15); color: #ffb300; border: 1px solid rgba(255, 179, 0, 0.4); font-size: 11px; padding: 4px 12px; border-radius: 12px; display: inline-block; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px;">
+                  5s Preview Ended
+                </div>
+                <h3 style="margin: 0 0 8px 0; color: #ffffff; font-size: 17px; font-weight: 700;">Video Monetized with Tessera</h3>
+                <p style="margin: 0 0 18px 0; color: #a0aec0; font-size: 13px; line-height: 1.5;">
+                  This video uses pay-per-second. Unlock the full watch on the origin instance.
+                </p>
+                <a href="${targetUrl}" target="_blank" rel="noopener" style="display: block; width: 100%; box-sizing: border-box; background: linear-gradient(135deg, #ffb300 0%, #d69e2e 100%); color: #000000; font-weight: 700; text-decoration: none; padding: 12px 16px; border-radius: 10px; font-size: 14px; box-shadow: 0 4px 16px rgba(255, 179, 0, 0.35); transition: transform 0.15s ease;">
+                  Continue Watching on Origin Instance
+                </a>
+              </div>
+            `
+              hostContainer.appendChild(teaserNoticeEl)
+            }
+          }
+        }
+
+        const bindTeaserToVideo = (v: HTMLVideoElement) => {
+          if (!v || (v as any).__tesseraTeaserBound) return
+          ;(v as any).__tesseraTeaserBound = true
+
+          const checkTime = () => {
+            if (isVideoOwner()) return
+            const isPaidSessionActive = Boolean((window as any).ArcCashier?.isSessionActive || (window as any).arcSessionUnlocked)
+            if (isPaidSessionActive) return
+
+            if (v.currentTime >= TEASER_PREVIEW_LIMIT_SECONDS || v.ended) {
+              v.pause()
+              document.body.classList.add('arc-locked')
+              console.log('[tessera] Teaser preview limit (5s) reached. Showing overlay notice.')
+              showTeaserOverlay()
+            }
+          }
+
+          v.addEventListener('timeupdate', checkTime)
+          v.addEventListener('ended', checkTime)
+        }
+
+        const observeVideoElement = () => {
+          const existingVideo = targetContainer?.querySelector('video') || document.querySelector('video')
+          if (existingVideo) {
+            bindTeaserToVideo(existingVideo)
+            return
+          }
+
+          let attempts = 0
+          const interval = setInterval(() => {
+            attempts++
+            const v = targetContainer?.querySelector('video') || document.querySelector('video')
+            if (v) {
+              clearInterval(interval)
+              bindTeaserToVideo(v)
+            } else if (attempts >= 40) {
+              clearInterval(interval)
+            }
+          }, 250)
+        }
+
+        observeVideoElement()
+    }
+  }
+
+  const handleVideoLoaded = async (video: any) => {
+    await cleanupVideoState()
+
+    if (video) {
+      // Reset initialization state for each new video
+      paywallInitialized = false
+
+      currentVideoId = video.uuid || video.id?.toString() || null
+      currentVideoOwner = video.account?.name || video.channel?.ownerAccount?.name || null
+
+      // Owner is now known — remove the resolving guard so the overlay
+      // fades in for regular users (checkPageVisibility keeps it hidden for owners)
+      document.body.classList.remove('arc-resolving-owner')
+      checkPageVisibility()
+
+      // Cover the player immediately while we load Tessera tags / wait for ArcCashier.
+      // Removed when paywall mounts, tip mode starts, or video is free/unmonetized.
+      if (!isVideoOwner()) showEarlyCover()
+
+      const { rate, mode, wallet, tipAmount, isLocal, originInstanceUrl } = await loadTesseraDataForVideo(video, currentVideoId)
+
+      // Initialize paywall engine based on the video's monetization mode
+      if (!isVideoOwner()) {
+        // Wait for the paywall bundle to be available (script may still be loading on first visit)
+        const waitForBundle = () => new Promise<void>((resolve) => {
+          if ((window as any).ArcCashier) return resolve()
+          script.addEventListener('load', () => resolve(), { once: true })
+        })
+        await waitForBundle()
+        initPaywallEngine(mode, wallet, tipAmount, isLocal, originInstanceUrl)
+      } else {
+        hideEarlyCover()
+      }
+
+      if ((window as any).arcResetVideoSession) {
+        const rateNum = rate ? parseFloat(rate) : null
+        ;(window as any).arcResetVideoSession(rateNum ?? undefined)
+        console.log(`[tessera] arcResetVideoSession called with rate=${rate ?? 'default'}`)
+      }
+      videoJustChanged = true
     }
   }
 
@@ -936,16 +1216,41 @@ export async function register (options: RegisterClientOptions) {
       if (params) {
         currentPlayerElement = params.playerElement || params.player?.el() || null
         console.log('[tessera] Player loaded hook triggered. Player element:', currentPlayerElement)
+        // Player chrome may appear after paywall init — re-constrain into the real host.
+        if (paywallInitialized) constrainTesseraOverlaysToPlayer(currentPlayerElement)
+        else {
+          // Move early cover into the real player as soon as it exists.
+          const early = document.getElementById(EARLY_COVER_ID)
+          if (early) constrainTesseraOverlaysToPlayer(currentPlayerElement)
+        }
       }
     }
   })
 
   registerHook({
     target: 'action:embed.player.loaded',
-    handler: (params: any) => {
+    handler: async (params: any) => {
       if (params) {
         currentPlayerElement = params.playerElement || params.player?.el() || null
         console.log('[tessera] Embed player loaded hook triggered. Player element:', currentPlayerElement)
+
+        const video = params.video || params.player?.video
+        if (video) {
+          await handleVideoLoaded(video)
+        } else {
+          const vId = getCurrentVideoId()
+          if (vId) {
+            try {
+              const res = await fetch(`/api/v1/videos/${encodeURIComponent(vId)}`)
+              if (res.ok) {
+                const fetchedVideo = await res.json()
+                await handleVideoLoaded(fetchedVideo)
+              }
+            } catch (err) {
+              console.error('[tessera] Embed video fetch failed:', err)
+            }
+          }
+        }
       }
     }
   })
@@ -953,44 +1258,8 @@ export async function register (options: RegisterClientOptions) {
   registerHook({
     target: 'action:video-watch.video.loaded',
     handler: async (params: any) => {
-      await cleanupVideoState()
-
       if (params && params.video) {
-        // Reset initialization state for each new video
-        paywallInitialized = false
-
-        currentVideoId = params.video.uuid || params.video.id?.toString() || null
-        currentVideoOwner = params.video.account?.name || params.video.channel?.ownerAccount?.name || null
-
-        // Owner is now known — remove the resolving guard so the overlay
-        // fades in for regular users (checkPageVisibility keeps it hidden for owners)
-        document.body.classList.remove('arc-resolving-owner')
-        checkPageVisibility()
-
-        const { rate, mode, wallet, tipAmount } = await loadTesseraDataForVideo(params.video, currentVideoId)
-
-        // Initialize paywall engine based on the video's monetization mode
-        if (!isVideoOwner()) {
-          // Wait for the paywall bundle to be available (script may still be loading on first visit)
-          const waitForBundle = () => new Promise<void>((resolve) => {
-            if ((window as any).ArcCashier) return resolve()
-            script.addEventListener('load', () => resolve(), { once: true })
-          })
-          await waitForBundle()
-          initPaywallEngine(mode, wallet, tipAmount)
-        }
-
-        // Reset session manager display immediately using the video's rate.
-        // This is done HERE (not in the ping handler) to avoid the 429 race condition:
-        // the first ping after a video change is frequently rate-limited and never
-        // returns ratePerSecond, leaving the old rate stuck on screen.
-        if ((window as any).arcResetVideoSession) {
-          const rateNum = rate ? parseFloat(rate) : null
-          ;(window as any).arcResetVideoSession(rateNum ?? undefined)
-          console.log(`[tessera] arcResetVideoSession called with rate=${rate ?? 'default'}`)
-        }
-        // Keep the flag so the ping handler can also update the rate if it arrives
-        videoJustChanged = true
+        await handleVideoLoaded(params.video)
       }
     }
   })
@@ -1057,7 +1326,9 @@ export async function register (options: RegisterClientOptions) {
           return
       }
 
+      // Do not queue a second start behind an in-flight ping (play + discovery race).
       if (pendingPing) {
+          if (action === 'start') return
           try { await pendingPing } catch { /* ignore */ }
       }
 
@@ -1071,10 +1342,11 @@ export async function register (options: RegisterClientOptions) {
               })
               if (!response.ok) {
                   if (response.status === 429) {
-                      console.warn('[tessera] Rate limited. Skipping this ping.')
-                  } else {
-                      console.warn(`[tessera] Ping failed with status: ${response.status}`)
+                      // Server already accepted a recent start/ping for this session.
+                      // Keep hasStarted so we do not immediately retry and loop 429s.
+                      return
                   }
+                  console.warn(`[tessera] Ping failed with status: ${response.status}`)
                   if (action === 'start') {
                       hasStarted = false
                   }
@@ -1151,10 +1423,12 @@ export async function register (options: RegisterClientOptions) {
       currentVideoId = null
       paywallInitialized = false // Allow next video to reinitialize paywall correctly
       isCleaningUp = false
+      stopContainedOverlayWatch()
       // Remove tip button when leaving a video (covers: back to menu, or switching
       // from a free video to a pay-per-second video)
       const tipContainer = document.getElementById('arc-tip-btn-container')
       if (tipContainer) tipContainer.remove()
+      hideEarlyCover()
       // Remove creator panel
       if (creatorPanelEl) {
           creatorPanelEl.remove()
