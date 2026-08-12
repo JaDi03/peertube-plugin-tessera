@@ -287,17 +287,9 @@ export async function register (options: RegisterServerOptions) {
        return cachedBaseUrl
     }
     const baseSetting = ((await settingsManager.getSetting('tessera-base-url') as string) || '').trim()
-    if (baseSetting) {
-      try {
-        cachedBaseUrl = new URL(baseSetting).origin
-        baseUrlCacheTime = Date.now()
-        return cachedBaseUrl
-      } catch { /* fall through */ }
-    }
-    const webhookUrl = await settingsManager.getSetting('webhook-url') as string
-    if (!webhookUrl) return null
+    if (!baseSetting) return null
     try {
-      cachedBaseUrl = new URL(webhookUrl).origin
+      cachedBaseUrl = new URL(baseSetting).origin
       baseUrlCacheTime = Date.now()
       return cachedBaseUrl
     } catch {
@@ -445,25 +437,16 @@ export async function register (options: RegisterServerOptions) {
     name: 'tessera-base-url',
     label: 'Tessera Base URL',
     type: 'input',
-    descriptionHTML: 'Sidecar origin used for sessions, assets, and creator API (e.g. http://127.0.0.1:7878).',
+    descriptionHTML: 'Sidecar origin (e.g. http://172.17.0.1:7878 or http://127.0.0.1:7878).',
     default: '',
     private: false
-  })
-
-  await registerSetting({
-    name: 'webhook-url',
-    label: 'Tessera Base URL (legacy)',
-    type: 'input',
-    descriptionHTML: 'Deprecated. Prefer Tessera Base URL. If set, only the origin is used.',
-    default: '',
-    private: true
   })
 
   await registerSetting({
     name: 'webhook-secret',
     label: 'Tessera Ingest Secret',
     type: 'input',
-    descriptionHTML: 'Must equal sidecar <code>TESSERA_INGEST_SECRET</code>. HMAC for sessions/start and sessions/stop.',
+    descriptionHTML: 'Must equal sidecar <code>TESSERA_INGEST_SECRET</code>.',
     default: '',
     private: true
   })

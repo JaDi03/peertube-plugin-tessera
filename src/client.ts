@@ -135,8 +135,8 @@ export async function register (options: RegisterClientOptions) {
           const creatorPct = (100 - displayFee * 100).toFixed(0);
           const adminPct = (displayFee * 100).toFixed(0);
           feeInfoEl.innerHTML = `
-            <div style="background: rgba(49, 130, 206, 0.1); border-left: 3px solid #3182ce; padding: 10px 14px; border-radius: 6px; font-size: 12px; color: #cbd5e0; margin-top: 10px; font-family: system-ui, -apple-system, sans-serif;">
-              <span style="color: #63b3ed; font-weight: bold; display: block; margin-bottom: 4px;">Platform fee:</span>
+            <div style="background: rgba(255, 179, 0, 0.1); border-left: 3px solid #ffb300; padding: 10px 14px; border-radius: 6px; font-size: 12px; color: #cbd5e0; margin-top: 10px; font-family: system-ui, -apple-system, sans-serif;">
+              <span style="color: #ffb300; font-weight: bold; display: block; margin-bottom: 4px;">Platform fee:</span>
               <p style="margin: 0; line-height: 1.5;">
                 ${adminPct}% to this instance, ${creatorPct}% to the creator when viewers watch here.
               </p>
@@ -479,18 +479,20 @@ export async function register (options: RegisterClientOptions) {
         let html = `
           <table style="width: 100%; border-collapse: collapse; font-size: 10px; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.1);">
             <thead>
-              <tr style="text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); color: #90cdf4;">
-                <th style="padding: 4px 0;">Video ID</th>
+              <tr style="text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ffb300;">
+                <th style="padding: 4px 0;">Resource</th>
                 <th style="padding: 4px 0; text-align: right;">Earnings</th>
               </tr>
             </thead>
             <tbody>
         `
         for (const s of data.stats) {
+          const label = s.resourceId || s.videoName || '—'
+          const amount = Number(s.amount)
           html += `
             <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-              <td style="padding: 4px 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.videoName}</td>
-              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #48bb78;">$${Number(s.amount).toFixed(4)}</td>
+              <td style="padding: 4px 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${label}</td>
+              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #ffb300;">$${Number.isFinite(amount) ? amount.toFixed(4) : '0.0000'}</td>
             </tr>
           `
         }
@@ -649,20 +651,20 @@ export async function register (options: RegisterClientOptions) {
           bottom: 20px;
           right: 20px;
           z-index: 10050;
-          background: rgba(17, 24, 39, 0.95);
+          background: rgba(6, 7, 10, 0.95);
           color: #f7fafc;
-          border: 1px solid rgba(99, 179, 237, 0.35);
+          border: 1px solid rgba(255, 179, 0, 0.35);
           border-radius: 12px;
           padding: 14px 16px;
           min-width: 240px;
-          box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+          box-shadow: 0 8px 24px rgba(0,0,0,0.45);
           font-family: system-ui, -apple-system, sans-serif;
         }
         #tessera-creator-panel h4 {
           margin: 0 0 8px;
           font-size: 13px;
-          font-weight: 600;
-          color: #90cdf4;
+          font-weight: 700;
+          color: #ffb300;
         }
         #tessera-creator-panel .tessera-wallet {
           font-size: 10px;
@@ -683,15 +685,16 @@ export async function register (options: RegisterClientOptions) {
           border-radius: 8px;
           cursor: pointer;
           font-size: 12px;
-          font-weight: 600;
+          font-weight: 700;
         }
         #tessera-creator-panel .btn-balance {
-          background: #2b6cb0;
-          color: white;
+          background: #ffb300;
+          color: #000;
         }
         #tessera-creator-panel .btn-withdraw {
-          background: #38a169;
-          color: white;
+          background: transparent;
+          color: #ffb300;
+          border: 1px solid rgba(255, 179, 0, 0.5);
         }
         #tessera-creator-panel button:disabled {
           opacity: 0.6;
@@ -753,20 +756,20 @@ export async function register (options: RegisterClientOptions) {
         let html = `
           <table style="width: 100%; border-collapse: collapse; font-size: 10px; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.1);">
             <thead>
-              <tr style="text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ecc94b;">
-                <th style="padding: 4px 0;">Video ID</th>
-                <th style="padding: 4px 0; text-align: right;">Display</th>
-                <th style="padding: 4px 0; text-align: right;">Origin</th>
+              <tr style="text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ffb300;">
+                <th style="padding: 4px 0;">Resource</th>
+                <th style="padding: 4px 0; text-align: right;">Earnings</th>
               </tr>
             </thead>
             <tbody>
         `
         for (const s of data.stats) {
+          const label = s.resourceId || s.videoName || '—'
+          const amount = Number(s.amount)
           html += `
             <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-              <td style="padding: 4px 0; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.videoName}</td>
-              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #48bb78;">$${Number(s.displayAmount).toFixed(4)}</td>
-              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #4299e1;">$${Number(s.originAmount).toFixed(4)}</td>
+              <td style="padding: 4px 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${label}</td>
+              <td style="padding: 4px 0; text-align: right; font-weight: bold; color: #ffb300;">$${Number.isFinite(amount) ? amount.toFixed(4) : '0.0000'}</td>
             </tr>
           `
         }
@@ -910,20 +913,20 @@ export async function register (options: RegisterClientOptions) {
           bottom: 20px;
           right: 20px;
           z-index: 10050;
-          background: rgba(17, 24, 39, 0.95);
+          background: rgba(6, 7, 10, 0.95);
           color: #f7fafc;
-          border: 1px solid rgba(236, 201, 75, 0.35); /* Yellow/Gold border for admin */
+          border: 1px solid rgba(255, 179, 0, 0.35);
           border-radius: 12px;
           padding: 14px 16px;
           min-width: 240px;
-          box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+          box-shadow: 0 8px 24px rgba(0,0,0,0.45);
           font-family: system-ui, -apple-system, sans-serif;
         }
         #tessera-admin-panel h4 {
           margin: 0 0 8px;
           font-size: 13px;
-          font-weight: 600;
-          color: #ecc94b; /* Gold text */
+          font-weight: 700;
+          color: #ffb300;
         }
         #tessera-admin-panel .tessera-wallet {
           font-size: 10px;
@@ -944,15 +947,16 @@ export async function register (options: RegisterClientOptions) {
           border-radius: 8px;
           cursor: pointer;
           font-size: 12px;
-          font-weight: 600;
+          font-weight: 700;
         }
         #tessera-admin-panel .btn-balance {
-          background: #d69e2e;
-          color: white;
+          background: #ffb300;
+          color: #000;
         }
         #tessera-admin-panel .btn-withdraw {
-          background: #38a169;
-          color: white;
+          background: transparent;
+          color: #ffb300;
+          border: 1px solid rgba(255, 179, 0, 0.5);
         }
         #tessera-admin-panel button:disabled {
           opacity: 0.6;
